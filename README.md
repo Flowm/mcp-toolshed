@@ -2,11 +2,34 @@
 
 MCP tools for making restricted parts of the web accessible to agents.
 
-Some platforms restrict their APIs or keep their history out of an agent's reach. mcp-toolshed wraps such sources as MCP servers, one per platform, so an agent can search and read them in a few tool calls.
+Some platforms restrict their APIs or keep their history out of an agent's reach. mcp-toolshed wraps such sources as MCP servers, one per platform, so an agent can search and read them in a few tool calls. The first is Reddit, served from the Arctic Shift archive.
 
 Each server runs on Cloudflare Workers at `/<platform>/mcp`, has only read-only tools, and returns compact markdown sized for an agent's context. Deployments have no authentication: anyone with the URL can use them, and their requests reach the platforms' APIs from your Worker.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Flowm/mcp-toolshed)
+
+## Platforms
+
+### Reddit: `/reddit/mcp`
+
+Reddit posts, comments, subreddits and users from the [Arctic Shift](https://arctic-shift.photon-reddit.com) archive ([API docs](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md)).
+
+| Tool                    | What it does                                                                                                                                                          |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_thread`            | Reads a post and its comment tree from whatever a user pastes: a post or comment URL, a share link (`/r/<sub>/s/<code>`), a redd.it link or an ID                     |
+| `search_posts`          | Finds posts by subreddit, author, keywords, flair, linked URL or date; with `group_by`, counts them per author, subreddit or date                                     |
+| `search_comments`       | Finds comments by subreddit, author, post, parent comment, text or date; with `group_by`, counts them the same way. An author alone gives that user's comment history |
+| `get_by_ids`            | Fetches up to 500 posts, comments or subreddits by ID; posts and comments also by URL                                                                                 |
+| `search_subreddits`     | Finds subreddits by name, name prefix, subscriber count, creation date or NSFW flag                                                                                   |
+| `get_subreddit_rules`   | Lists the rules of one or more subreddits                                                                                                                             |
+| `get_subreddit_wikis`   | Reads a subreddit's wiki pages, or lists their paths                                                                                                                  |
+| `search_users`          | Finds users by name or name prefix, with karma, post and comment counts and first and last activity                                                                   |
+| `get_user_interactions` | Shows whom a user interacts with most, each individual interaction, or the subreddits they are active in                                                              |
+| `get_time_series`       | Shows post and comment counts, total scores or subscribers over time, Reddit-wide or for one subreddit                                                                |
+
+Post and comment filters such as `link_id` and `parent_id` accept Reddit URLs as well as IDs.
+
+Results that include items under 36 hours old carry a note that their scores and comment counts are placeholders until Arctic Shift backfills them. Requests that fail with HTTP 422 (usually a timeout) or 5xx are retried once.
 
 ## How it works
 
@@ -31,7 +54,7 @@ pnpm lint:fix
 pnpm test         # vitest in workerd via @cloudflare/vitest-plugin
 ```
 
-Test with the MCP Inspector (`npx @modelcontextprotocol/inspector@latest`) pointed at a platform's endpoint, `http://localhost:8788/<platform>/mcp`.
+Test with the MCP Inspector (`npx @modelcontextprotocol/inspector@latest`) pointed at an endpoint such as `http://localhost:8788/reddit/mcp`.
 
 `@types/node` is a dev dependency even though `src/` uses no Node APIs: with the compatibility date in `wrangler.jsonc` the Workers runtime enables Node.js compatibility by default, and without the types `wrangler types` (run by `lint`, `test` and `type-check`) asks to install them on every run.
 
@@ -81,5 +104,5 @@ For local settings, copy `mise.local.toml.example` to `mise.local.toml`, which i
 For example Claude Code:
 
 ```sh
-claude mcp add --transport http <platform> https://<your-deployment>/<platform>/mcp
+claude mcp add --transport http reddit https://<your-deployment>/reddit/mcp
 ```
