@@ -63,7 +63,7 @@ Test with the MCP Inspector (`npx @modelcontextprotocol/inspector@latest`) point
 1. Create `src/platforms/<id>/` exporting a `Platform` (`src/core/platform.ts`): its id (the URL segment, named after the platform rather than the data source), server name, description, instructions and `registerTools`.
 2. Build its API client with `createJsonClient` (`src/core/client.ts`), passing hooks for how the API wraps payloads and errors and which failures to retry.
 3. Give every tool the output settings from `outputSettings` and use the helpers in `src/core/tool.ts`, `output.ts` and `markdown.ts`.
-4. Add it to `PLATFORMS` in `src/platforms/index.ts`.
+4. Add it to `PLATFORMS` in `src/platforms/index.ts`. The contract tests (`src/platforms/contract.test.ts`) then check it through its endpoint: a URL-safe id, uniquely named and documented tools, read-only annotations, the output settings on every tool, and tool definitions under 20,000 characters (about 5k tokens).
 
 Secrets are named `<PLATFORM>_<NAME>`. List them without values in `.dev.vars.example`, which the Deploy to Cloudflare setup page asks for, and describe each under `cloudflare.bindings` in `package.json`. Put local values in `.dev.vars` (gitignored) and production values in with `wrangler secret put`. Code reads them through `import { env } from "cloudflare:workers"`, since the MCP server factory gets no `env`.
 
