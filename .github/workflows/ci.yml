@@ -1,0 +1,135 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm ci
+      - run: pnpm lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm ci
+      - run: pnpm test
+  # Previews and deploys need the CLOUDFLARE_API_TOKEN secret. Copies of this repository without it, such as
+  # Deploy to Cloudflare clones that deploy through Workers Builds, skip them instead of failing. A job's `if`
+  # cannot read secrets, so this job turns the check into an output.
+  cloudflare:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: echo "enabled=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
+  preview:
+    needs: [lint, test, cloudflare]
+    # PRs targeting main, excluding forks (which can't access the deploy secrets).
+    if: needs.cloudflare.outputs.enabled == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm ci
+      # First 8 chars of the PR head commit form the preview alias, so the URL is
+      # reproducible from a commit (and matches `pnpm deploy:preview` locally).
+      # Cloudflare requires the alias to start with a lowercase letter (a bare SHA
+      # beginning with a hex digit is rejected — API code 10021), so prefix `preview-`.
+      - id: meta
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: echo "sha=${HEAD_SHA:0:8}" >> "$GITHUB_OUTPUT"
+      # Upload a new Worker version without promoting it to production. The
+      # --preview-alias mints a stable URL (preview-<sha>-mcp-toolshed.<subdomain>.workers.dev).
+      - id: preview
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          packageManager: pnpm
+          command: versions upload --preview-alias preview-${{ steps.meta.outputs.sha }} --var REPOSITORY_URL:${{ github.server_url }}/${{ github.repository }}
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.deployment-url }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        with:
+          script: |
+            const marker = '<!-- mcp-toolshed-preview -->';
+            // wrangler-action returns the per-version URL (https://<8-hex>-<worker>.<sub>.workers.dev);
+            // swap the version prefix for our commit alias to get the URL deploy:preview reproduces.
+            const sha = process.env.SHA;
+            const versionUrl = process.env.PREVIEW_URL;
+            const aliasUrl = versionUrl
+              ? versionUrl.replace(/^https:\/\/[0-9a-f]{8}-/, `https://preview-${sha}-`)
+              : '';
+            const body = [
+              marker,
+              '### Preview deployment',
+              '',
+              aliasUrl ? `This PR is live at ${aliasUrl}, which lists its MCP endpoints (/<platform>/mcp).` : 'Preview upload finished but no URL was reported.',
+              '',
+              `_Commit \`${sha}\` — reproduce locally with \`pnpm deploy:preview\`._`,
+            ].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+  deploy:
+    needs: [lint, test, cloudflare]
+    if: needs.cloudflare.outputs.enabled == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm ci
+      # The custom domain comes from the DEPLOY_DOMAIN repository variable, so a fork deploys to its
+      # own workers.dev URL until it sets one. REPOSITORY_URL names this repository in the User-Agent.
+      - uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          packageManager: pnpm
+          command: deploy${{ vars.DEPLOY_DOMAIN && format(' --domain {0}', vars.DEPLOY_DOMAIN) || '' }} --var REPOSITORY_URL:${{ github.server_url }}/${{ github.repository }}

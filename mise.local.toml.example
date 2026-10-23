@@ -1,0 +1,8 @@
+# Settings for deploying from this machine. Copy to mise.local.toml (gitignored) and fill in.
+# CI takes the same settings from the DEPLOY_DOMAIN repository variable and its own repository.
+
+[env]
+# Custom domain to serve at, in a zone on your Cloudflare account. Remove to deploy to workers.dev.
+DEPLOY_DOMAIN = "mcp.example.com"
+# Repository named in the User-Agent sent to the platforms' APIs.
+REPOSITORY_URL = "https://github.com/<owner>/mcp-toolshed"

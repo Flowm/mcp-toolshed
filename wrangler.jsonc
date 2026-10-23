@@ -1,0 +1,18 @@
+// Forks and Deploy to Cloudflare clones deploy from this file as it is, so it holds nothing account-specific:
+// no account_id, routes or resource IDs. The custom domain comes from DEPLOY_DOMAIN at deploy time, and new
+// storage bindings (KV, D1, ...) need a default name and no ID so a clone's first deploy can create them.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-toolshed",
+  "compatibility_date": "2026-10-01",
+  "main": "src/index.ts",
+  "send_metrics": false,
+  "preview_urls": true,
+  // Set at deploy time (CI passes its repository) and sent in the User-Agent; see src/core/client.ts.
+  "vars": {
+    "REPOSITORY_URL": "",
+  },
+  "observability": {
+    "enabled": true,
+  },
+}

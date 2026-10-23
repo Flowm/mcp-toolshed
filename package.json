@@ -1,0 +1,40 @@
+{
+  "name": "mcp-toolshed",
+  "version": "0.0.0",
+  "private": true,
+  "description": "MCP tools for making restricted parts of the web accessible to agents, served from Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy ${DEPLOY_DOMAIN:+--domain \"$DEPLOY_DOMAIN\"} ${REPOSITORY_URL:+--var \"REPOSITORY_URL:$REPOSITORY_URL\"}",
+    "deploy:preview": "wrangler versions upload --preview-alias preview-$(git rev-parse --short=8 HEAD) ${REPOSITORY_URL:+--var \"REPOSITORY_URL:$REPOSITORY_URL\"}",
+    "dev": "wrangler dev --port ${PORT:-8788}",
+    "generate-types": "wrangler types src/worker-configuration.d.ts",
+    "lint": "pnpm generate-types && oxlint && oxfmt --check && tsc --noEmit",
+    "lint:fix": "oxlint --fix && oxfmt --write",
+    "test": "pnpm generate-types && vitest run",
+    "test:watch": "pnpm generate-types && vitest",
+    "type-check": "pnpm generate-types && tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "^0.29.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.6",
+    "@types/node": "^26.6.5",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.150.0"
+  },
+  "packageManager": "pnpm@12.15.0",
+  "cloudflare": {
+    "bindings": {
+      "REPOSITORY_URL": {
+        "description": "URL of your copy of this repository, sent in the User-Agent so the platforms' API operators can tell whose deployment is calling. Leave empty to send none."
+      }
+    }
+  }
+}
