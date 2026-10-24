@@ -2,15 +2,13 @@
 
 import { z } from "zod";
 
+import { numeric } from "./input.ts";
+
 export const DEFAULT_MAX_CHARS = 40_000;
 
 const outputSchema = z.object({
   format: z.enum(["markdown", "json"]).optional().describe("markdown (default): compact summary of the key fields. json: the raw API records."),
-  max_chars: z
-    .number()
-    .int()
-    .min(1000)
-    .max(500_000)
+  max_chars: numeric(z.number().int().min(1000).max(500_000))
     .optional()
     .describe(`Character budget for the result (default ${DEFAULT_MAX_CHARS}); longer output is truncated with a notice.`),
 });

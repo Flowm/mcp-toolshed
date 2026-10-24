@@ -2,6 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import type { Params } from "../../core/client.ts";
+import { flag, numeric } from "../../core/input.ts";
+import { asList, type Thing } from "../../core/markdown.ts";
 import { DEFAULT_MAX_CHARS, fieldsFor, limitChars, type Output, outputSettings, type Render, renderJson, respond } from "../../core/output.ts";
 import type { Platform } from "../../core/platform.ts";
 import { apiParams, fetchAndRender, InputError, onlyWith, readOnly, toolResult } from "../../core/tool.ts";
@@ -10,17 +12,16 @@ import {
   FRESHNESS,
   renderComments,
   renderCounts,
-  renderInteractionList,
   renderPosts,
-  renderRules,
+  renderSubredditInfo,
   renderSubreddits,
   renderThread,
   renderTimeSeries,
-  renderUsers,
-  renderWikiPaths,
-  renderWikis,
+  SUBREDDIT_SECTIONS,
+  type SubredditInfo,
+  type SubredditSection,
 } from "./render.ts";
-import { type Kind, resolveId, resolveIds, resolveTarget } from "./targets.ts";
+import { resolveId, resolveTarget } from "./targets.ts";
 
 // Fields the markdown renderers use; requested by default so responses stay small and fast.
 const POST_FIELDS = ["id", "title", "author", "subreddit", "score", "num_comments", "created_utc", "url", "selftext", "over_18", "link_flair_text"];
@@ -34,10 +35,21 @@ const fields = z.array(z.string()).optional().describe("Only fetch these fields.
 
 const output = outputSettings;
 
+// Searches of several subreddits run one per subreddit; Arctic Shift has no multi-subreddit filter.
+const MAX_SUBREDDITS = 5;
+// Arctic Shift throttles bursts of heavy queries, so a fan-out runs this many searches at a time.
+const FAN_OUT_CONCURRENCY = 2;
+// rank_by ranks Arctic Shift's largest listing page per subreddit; "auto" is not allowed with keyword search.
+const RANK_WINDOW = 100;
+const RANK_FIELDS = { comments: "num_comments", score: "score" } as const;
+
 // Filters shared by post and comment search.
 const commonFilters = {
   author: z.string().optional().describe("Username (u/ prefix optional)"),
-  subreddit: z.string().optional().describe("Subreddit name (r/ prefix optional)"),
+  subreddit: z
+    .union([z.string(), z.array(z.string()).min(1).max(MAX_SUBREDDITS)])
+    .optional()
+    .describe(`Subreddit name (r/ prefix optional), or up to ${MAX_SUBREDDITS} names to search each and merge the listings`),
   author_flair_text: z.string().optional().describe("Keyword search on author flair"),
   after: date.optional().describe("Only things created after this date"),
   before: date.optional().describe("Only things created before this date"),
@@ -46,14 +58,18 @@ const commonFilters = {
 const postFilters = {
   ...commonFilters,
   crosspost_parent_id: postRef.optional().describe("Only crossposts of this post (ID or URL)"),
-  over_18: z.boolean().optional(),
-  spoiler: z.boolean().optional(),
+  over_18: flag().optional(),
+  spoiler: flag().optional(),
   title: z.string().optional().describe("Keyword search in title. Requires author or subreddit."),
   selftext: z.string().optional().describe("Keyword search in body text. Requires author or subreddit."),
   link_flair_text: z.string().optional().describe("Keyword search on post flair"),
   query: z.string().optional().describe("Keyword search in title and selftext. Requires author or subreddit."),
   url: z.string().optional().describe("Prefix match on the linked URL"),
-  url_exact: z.boolean().optional().describe("Only exact matches for url"),
+  url_exact: flag().optional().describe("Only exact matches for url"),
+  rank_by: z
+    .enum(["comments", "score"])
+    .optional()
+    .describe(`Listing: most comments or highest score first, among the ${RANK_WINDOW} newest matches per subreddit (oldest with sort=asc)`),
 };
 
 const commentFilters = {
@@ -69,30 +85,17 @@ const searchOptionsSchema = z.object({
     .optional()
     .describe("Count matches per date bucket, author or subreddit instead of listing them. Very active users or subreddits may time out."),
   frequency: z.string().optional().describe("Bucket size, required with group_by=created_utc (year, month, week, day, hour); that grouping also needs after or before"),
-  min_count: z.number().int().min(0).optional().describe("With group_by=author/subreddit: skip groups with fewer matches"),
+  min_count: numeric(z.number().int().min(0)).optional().describe("With group_by=author/subreddit: skip groups with fewer matches"),
   limit: z
-    .union([z.number().int().min(1), z.literal("auto")])
+    .union([numeric(z.number().int().min(1)), z.literal("auto")])
     .optional()
     .describe('Listing: 1-100 (default 25), or "auto" for 100-1000 depending on server load. With group_by: max groups (default all).'),
-  sort: z.enum(["asc", "desc"]).optional().describe("Listing: by creation date, the only order the API supports. With group_by: by count, or by date for created_utc."),
+  sort: z.enum(["asc", "desc"]).optional().describe("Listing: by creation date (search_posts can rank_by instead). With group_by: by count, or by date for created_utc."),
   fields,
   ...output,
 });
-type SearchOptions = z.infer<typeof searchOptionsSchema>;
+type SearchOptions = z.infer<typeof searchOptionsSchema> & { rank_by?: keyof typeof RANK_FIELDS };
 const searchOptions = searchOptionsSchema.shape;
-
-// get_by_ids: the ID kind each lookup resolves URLs to (subreddit IDs are plain), its default fields and renderer.
-const ID_LOOKUPS: Record<"posts" | "comments" | "subreddits", { kind?: Kind; defaults: string[]; render: Render }> = {
-  posts: { kind: "t3", defaults: POST_FIELDS, render: renderPosts },
-  comments: { kind: "t1", defaults: COMMENT_FIELDS, render: renderComments },
-  subreddits: { defaults: SUBREDDIT_FIELDS, render: renderSubreddits },
-};
-
-const INTERACTION_ENDPOINTS: Record<"users" | "users_list" | "subreddits", { path: string; render: Render }> = {
-  users: { path: "/api/users/interactions/users", render: renderCounts },
-  users_list: { path: "/api/users/interactions/users/list", render: renderInteractionList },
-  subreddits: { path: "/api/users/interactions/subreddits", render: renderCounts },
-};
 
 /** Handler for a tool that forwards its arguments to one Arctic Shift endpoint. */
 const forward = (path: string, render: Render) => (args: Output & Params) => toolResult(() => fetchAndRender(callApi, path, args, render));
@@ -110,24 +113,77 @@ async function resolveCommentFilters<T extends { link_id?: string; parent_id?: s
   };
 }
 
+/**
+ * Runs `search` for each subreddit, FAN_OUT_CONCURRENCY at a time. A subreddit that fails becomes a note and the
+ * others' results are kept; when every search fails, the first error is thrown.
+ */
+async function eachSubreddit(subreddits: (string | undefined)[], search: (subreddit?: string) => Promise<unknown>): Promise<{ results: unknown[]; notes: string[] }> {
+  // Searches share FAN_OUT_CONCURRENCY lanes; each lane starts its next search when its last one settles.
+  const lanes: Promise<unknown>[] = Array.from({ length: FAN_OUT_CONCURRENCY }, () => Promise.resolve());
+  const runs = subreddits.map((name, i) => {
+    const run = lanes[i % FAN_OUT_CONCURRENCY]!.then(() => search(name));
+    lanes[i % FAN_OUT_CONCURRENCY] = run.catch(() => undefined);
+    return run;
+  });
+  const settled = await Promise.allSettled(runs);
+  const failures = settled.flatMap((result, i) => (result.status === "rejected" ? [{ subreddit: subreddits[i], error: result.reason as unknown }] : []));
+  if (failures.length === settled.length) throw failures[0]?.error;
+  return {
+    results: settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
+    notes: failures.map(({ subreddit, error }) => `_r/${subreddit} is left out: ${error instanceof Error ? error.message : String(error)}_`),
+  };
+}
+
+const byDate = (sort: unknown) => (a: Thing, b: Thing) => (sort === "asc" ? 1 : -1) * (Number(a.created_utc) - Number(b.created_utc));
+
 /** Lists matches from `<path>`, or counts them per group via `<path>/aggregate` when group_by is set. */
-async function searchOrCount(path: string, options: SearchOptions & Params, defaults: string[], render: Render): Promise<string> {
-  const { fields: requested, group_by, frequency, min_count, ...rest } = options;
+async function searchOrCount(path: string, options: SearchOptions & { subreddit?: string | string[] } & Params, defaults: string[], render: Render): Promise<string> {
+  const { fields: requested, group_by, frequency, min_count, rank_by, subreddit, ...rest } = options;
   const filters = apiParams(rest);
+  const subreddits = Array.isArray(subreddit) ? [...new Set(subreddit)] : [subreddit];
   if (!group_by) {
     onlyWith({ frequency, min_count }, ["frequency", "min_count"], false, "group_by");
     if (typeof filters.limit === "number" && filters.limit > 100) {
       throw new InputError('limit must be 1-100 (or "auto") when listing results; larger limits only apply with group_by.');
     }
-    const data = await callApi(path, { ...filters, fields: fieldsFor(options.format, requested, defaults) });
-    return respond(data, options, render);
+    if (rank_by && filters.limit === "auto") throw new InputError(`limit "auto" does not apply with rank_by, which ranks the ${RANK_WINDOW} newest matches.`);
+    // Arctic Shift lists 25 by default; merging subreddits and ranking trim to the same.
+    const limit = options.limit ?? 25;
+    // Merging by date and ranking need their fields even when the caller narrowed fields.
+    const fetched = fieldsFor(options.format, requested, defaults);
+    const needed = [...(subreddits.length > 1 ? ["created_utc"] : []), ...(rank_by ? [RANK_FIELDS[rank_by]] : [])];
+    const { results, notes } = await eachSubreddit(subreddits, (name) =>
+      callApi(path, { ...filters, subreddit: name, limit: rank_by ? RANK_WINDOW : options.limit, fields: fetched && [...new Set([...fetched, ...needed])] }),
+    );
+    let rows = results.flatMap(asList);
+    if (subreddits.length > 1) rows.sort(byDate(filters.sort));
+    if (rank_by && rows.length > 0) {
+      const key = RANK_FIELDS[rank_by];
+      // A stable sort, so ties keep their date order.
+      rows.sort((a, b) => Number(b[key] ?? 0) - Number(a[key] ?? 0));
+      const windowFull = results.some((result) => asList(result).length === RANK_WINDOW);
+      const scope = windowFull
+        ? `the ${RANK_WINDOW} ${filters.sort === "asc" ? "oldest" : "newest"} matches${subreddits.length > 1 ? " in each subreddit" : ""}; narrow after/before to rank another period`
+        : `all ${rows.length} matches`;
+      notes.push(`_Ranked by ${rank_by} among ${scope}._`);
+    }
+    if (limit !== "auto") rows = rows.slice(0, limit);
+    return respond(rows, options, (data) => [...notes, render(data)].join("\n\n"));
   }
+  onlyWith({ rank_by }, ["rank_by"], false, "a listing, without group_by");
+  if (subreddits.length > 1) throw new InputError("Several subreddits only apply when listing; with group_by, count one subreddit per call.");
   onlyWith({ frequency }, ["frequency"], group_by === "created_utc", "group_by=created_utc");
   onlyWith({ min_count }, ["min_count"], group_by !== "created_utc", "group_by=author or group_by=subreddit");
   if (filters.limit === "auto") throw new InputError('limit "auto" does not apply with group_by; omit limit to get all groups.');
   if (group_by === "created_utc" && !frequency) throw new InputError("group_by=created_utc needs frequency (e.g. year, month, day).");
-  const data = await callApi(`${path}/aggregate`, { ...filters, aggregate: group_by, frequency, min_count });
+  const data = await callApi(`${path}/aggregate`, { ...filters, subreddit: subreddits[0], aggregate: group_by, frequency, min_count });
   return respond(data, options, (rows) => renderCounts(rows, { group: group_by, frequency }));
+}
+
+/** A wiki page as Arctic Shift names it, /r/<subreddit>/wiki/<page>, from a page name, path or URL. */
+function wikiPath(subreddit: string, page: string): string {
+  const path = /\/r\/[^/]+\/wiki\/[^?#]+/i.exec(page)?.[0] ?? `/r/${subreddit}/wiki/${page.replace(/^\/*(?:wiki\/)?/i, "")}`;
+  return path.replace(/\/+$/, "");
 }
 
 function registerTools(server: McpServer): void {
@@ -140,11 +196,11 @@ function registerTools(server: McpServer): void {
         "A comment URL or ID focuses on that comment's subtree. Collapsed branches show as [+N more] with how to expand them.",
       inputSchema: z.object({
         url_or_id: z.string().describe("Reddit post or comment URL, share link (/r/<sub>/s/<code>), redd.it link, or ID (bare = post, t3_ = post, t1_ = comment)"),
-        comment_limit: z.number().int().min(0).max(25000).optional().describe("Max comments to fetch (default 100). 0 returns the post only."),
+        comment_limit: numeric(z.number().int().min(0).max(25000)).optional().describe("Max comments to fetch (default 100). 0 returns the post only."),
         parent_id: commentRef.optional().describe("Only return the subtree of this comment (ID or URL)"),
         sort: z.enum(["tree", "top"]).optional().describe("tree (default): Reddit's order. top: highest score first at each level."),
-        start_depth: z.number().int().min(0).optional().describe("Reply levels to expand before collapsing (default 4)"),
-        start_breadth: z.number().int().min(0).optional().describe("Replies per level to expand before collapsing (default 4)"),
+        start_depth: numeric(z.number().int().min(0)).optional().describe("Reply levels to expand before collapsing (default 4)"),
+        start_breadth: numeric(z.number().int().min(0)).optional().describe("Replies per level to expand before collapsing (default 4)"),
         ...output,
       }),
       annotations: readOnly,
@@ -181,6 +237,7 @@ function registerTools(server: McpServer): void {
       description:
         "Search archived Reddit posts by author, subreddit, date range, keywords, flair or linked URL, sorted by date. " +
         "Keyword filters (title/selftext/query) need author or subreddit set. " +
+        "For reviews or opinions, search the likely subreddits together and set rank_by=comments to find the most discussed threads, then read them with get_thread. " +
         "Set group_by to count matches per author, subreddit or date bucket instead (e.g. top posters in a subreddit, a user's posts per year).",
       inputSchema: z.object({ ...postFilters, ...searchOptions }),
       annotations: readOnly,
@@ -204,30 +261,6 @@ function registerTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "get_by_ids",
-    {
-      title: "Look up by ID",
-      description:
-        "Fetch posts, comments or subreddits by ID (up to 500). Posts and comments also accept Reddit URLs and share links. " +
-        "Useful for IDs found in search results or interaction lists.",
-      inputSchema: z.object({
-        kind: z.enum(["posts", "comments", "subreddits"]),
-        ids: z.array(z.string()).min(1).max(500).describe("IDs (e.g. ei30r4, t3_ei30r4) or, for posts and comments, Reddit URLs"),
-        fields,
-        ...output,
-      }),
-      annotations: readOnly,
-    },
-    ({ kind, ids, fields: requested, ...settings }) =>
-      toolResult(async () => {
-        const lookup = ID_LOOKUPS[kind];
-        const resolved = lookup.kind ? await resolveIds(ids, lookup.kind) : ids;
-        const data = await callApi(`/api/${kind}/ids`, { ids: resolved, fields: fieldsFor(settings.format, requested, lookup.defaults) });
-        return respond(data, settings, lookup.render);
-      }),
-  );
-
-  server.registerTool(
     "search_subreddits",
     {
       title: "Search subreddits",
@@ -237,10 +270,10 @@ function registerTools(server: McpServer): void {
         subreddit_prefix: z.string().optional(),
         after: date.optional().describe("Subreddit created after"),
         before: date.optional().describe("Subreddit created before"),
-        min_subscribers: z.number().int().optional(),
-        max_subscribers: z.number().int().optional(),
-        over18: z.boolean().optional(),
-        limit: z.number().int().min(1).max(1000).optional().describe("Default 25"),
+        min_subscribers: numeric(z.number().int()).optional(),
+        max_subscribers: numeric(z.number().int()).optional(),
+        over18: flag().optional(),
+        limit: numeric(z.number().int().min(1).max(1000)).optional().describe("Default 25"),
         sort: z.enum(["asc", "desc"]).optional().describe("Default desc"),
         sort_type: z.enum(["created_utc", "subscribers", "subreddit"]).optional().describe("Default subscribers"),
         fields,
@@ -253,88 +286,34 @@ function registerTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "get_subreddit_rules",
+    "get_subreddit_info",
     {
-      title: "Get subreddit rules",
-      description: "Get the rules of one or more subreddits.",
-      inputSchema: z.object({ subreddits: z.array(z.string()).min(1).max(1000), ...output }),
-      annotations: readOnly,
-    },
-    forward("/api/subreddits/rules", renderRules),
-  );
-
-  server.registerTool(
-    "get_subreddit_wikis",
-    {
-      title: "Get subreddit wiki pages",
-      description: "Get wiki page contents, either all pages of a subreddit or specific paths (e.g. /r/travel/wiki/faq). Set list_only to get just the page paths of a subreddit.",
-      inputSchema: z.object({
-        subreddit: z.string().optional(),
-        paths: z.array(z.string()).max(100).optional(),
-        limit: z.number().int().min(1).max(100).optional(),
-        list_only: z.boolean().optional().describe("Return only the wiki page paths (requires subreddit)"),
-        ...output,
-      }),
-      annotations: readOnly,
-    },
-    ({ list_only, ...args }) =>
-      toolResult(() =>
-        list_only
-          ? fetchAndRender(callApi, "/api/subreddits/wikis/list", { subreddit: args.subreddit, format: args.format, max_chars: args.max_chars }, renderWikiPaths)
-          : fetchAndRender(callApi, "/api/subreddits/wikis", args, renderWikis),
-      ),
-  );
-
-  server.registerTool(
-    "search_users",
-    {
-      title: "Search users",
-      description: "Find users by name, name prefix, karma, activity counts. Returns aggregate stats (post/comment counts, first/last activity, karma); updated infrequently.",
-      inputSchema: z.object({
-        author: z.string().optional(),
-        author_prefix: z.string().optional(),
-        min_num_posts: z.number().int().optional(),
-        min_num_comments: z.number().int().optional(),
-        active_since: date.optional(),
-        min_karma: z.number().int().optional(),
-        limit: z.number().int().min(1).max(1000).optional().describe("Default 25"),
-        sort: z.enum(["asc", "desc"]).optional(),
-        sort_type: z.enum(["author", "total_karma"]).optional(),
-        ...output,
-      }),
-      annotations: readOnly,
-    },
-    forward("/api/users/search", renderUsers),
-  );
-
-  server.registerTool(
-    "get_user_interactions",
-    {
-      title: "Get user interactions",
+      title: "Get subreddit info",
       description:
-        "See who or where a user interacts. with=users: aggregated reply counts with other users; " +
-        "with=users_list: individual interactions; with=subreddits: activity per subreddit. " +
-        "Very active users may time out; narrow with after/before.",
+        "Get a subreddit's description and stats (about), its rules and its wiki, in one call; include picks the sections. " +
+        "The wiki section lists the wiki pages; set wiki_pages to read pages instead, by name (faq, guides/glossary), path or URL.",
       inputSchema: z.object({
-        author: z.string(),
-        with: z.enum(["users", "users_list", "subreddits"]),
-        subreddit: z.string().optional().describe("Only for with=users/users_list"),
-        after: date.optional(),
-        before: date.optional(),
-        min_count: z.number().int().min(0).optional(),
-        limit: z.number().int().min(1).optional().describe("Default 100"),
-        weight_posts: z.number().optional().describe("Only for with=subreddits (default 1.0)"),
-        weight_comments: z.number().optional().describe("Only for with=subreddits (default 1.0)"),
+        subreddit: z.string().describe("Subreddit name (r/ prefix optional)"),
+        include: z.array(z.enum(SUBREDDIT_SECTIONS)).min(1).optional().describe("Sections to return. Default: all, or only wiki when wiki_pages is set."),
+        wiki_pages: z.array(z.string()).min(1).max(100).optional().describe("Wiki pages to read, e.g. faq or /r/travel/wiki/faq"),
         ...output,
       }),
       annotations: readOnly,
     },
-    ({ with: target, ...args }) =>
+    ({ subreddit, include, wiki_pages, ...settings }) =>
       toolResult(async () => {
-        onlyWith(args, ["subreddit"], target !== "subreddits", "with=users or with=users_list");
-        onlyWith(args, ["weight_posts", "weight_comments"], target === "subreddits", "with=subreddits");
-        const endpoint = INTERACTION_ENDPOINTS[target];
-        return fetchAndRender(callApi, endpoint.path, args, endpoint.render);
+        onlyWith({ wiki_pages }, ["wiki_pages"], !include || include.includes("wiki"), "wiki in include");
+        // The rules and wiki endpoints return nothing for a name with an r/ prefix.
+        const name = subreddit.replace(/^\/?r\//i, "");
+        const paths = wiki_pages?.map((page) => wikiPath(name, page));
+        const fetchSection: Record<SubredditSection, () => Promise<unknown>> = {
+          about: async () => asList(await callApi("/api/subreddits/search", { subreddit: name }))[0] ?? null,
+          rules: async () => asList(await callApi("/api/subreddits/rules", { subreddits: name }))[0]?.rules ?? [],
+          wiki: () => (paths ? callApi("/api/subreddits/wikis", { paths }) : callApi("/api/subreddits/wikis/list", { subreddit: name })),
+        };
+        const sections = new Set(include ?? (paths ? ["wiki" as const] : SUBREDDIT_SECTIONS));
+        const data: SubredditInfo = Object.fromEntries(await Promise.all([...sections].map(async (section) => [section, await fetchSection[section]()])));
+        return respond(data, settings, () => renderSubredditInfo(name, data, paths));
       }),
   );
 
@@ -362,11 +341,11 @@ export const reddit: Platform = {
   id: "reddit",
   name: "arctic-shift",
   version: "1.0.0",
-  description: `Query archived Reddit posts, comments, subreddits and users via the Arctic Shift API (${BASE_URL}).`,
+  description: `Query archived Reddit posts, comments and subreddits via the Arctic Shift API (${BASE_URL}).`,
   instructions:
     "Read-only access to the Arctic Shift archive of Reddit. For any Reddit link, start with get_thread. " +
     "Results are compact markdown by default; pass format=json for raw records. " +
-    "Search results are sorted by date only; for most active authors or subreddits, set group_by on search_posts/search_comments. " +
-    `If a query times out, narrow it with subreddit, author or an after/before range. ${FRESHNESS}`,
+    "For most active authors or subreddits, set group_by on search_posts/search_comments. " +
+    FRESHNESS,
   registerTools,
 };

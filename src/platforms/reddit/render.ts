@@ -1,7 +1,7 @@
 // Compact markdown for model consumption. A raw post carries ~90 fields and a busy
 // comment tree is hundreds of KB of JSON; these renderers keep the handful that matter.
 
-import { asList, clip, counted, field, formatDate, indent, meta, normalizeNewlines, num, plural, str, type Thing } from "../../core/markdown.ts";
+import { asList, clip, counted, decodeEntities, field, formatDate, indent, meta, normalizeNewlines, num, plural, str, type Thing } from "../../core/markdown.ts";
 
 const BODY_MAX_CHARS = 1500;
 const SELFTEXT_MAX_CHARS = 4000;
@@ -13,6 +13,18 @@ export const FRESHNESS = "Scores and comment counts of items posted under 36h ag
 export const FRESHNESS_NOTE = `_Note: ${FRESHNESS}_`;
 
 const bareId = (id: unknown): string => str(id).replace(/^t[13]_/, "");
+
+/**
+ * Text someone wrote, as Reddit shows it. Older posts and comments, and some wiki pages, arrive HTML-escaped, and
+ * Reddit's editor marks empty paragraphs with a zero-width space (&amp;#x200B; once escaped); those are dropped
+ * with the blank lines they leave.
+ */
+const text = (value: unknown): string =>
+  decodeEntities(normalizeNewlines(value))
+    .replaceAll(/&#x200b;|\u200b/gi, "")
+    .replaceAll(/\n\s*\n/g, "\n\n");
+
+const excerpt = (value: unknown, limit: number) => clip(text(value), limit);
 
 function isFresh(thing: Thing): boolean {
   const created = Number(thing.created_utc);
@@ -35,7 +47,7 @@ function commentLink(comment: Thing): string {
 }
 
 function outboundLink(post: Thing): string {
-  const url = str(post.url);
+  const url = text(post.url);
   return url && !/^https?:\/\/(?:[\w-]+\.)?(?:reddit\.com|redd\.it)\//.test(url) ? url : "";
 }
 
@@ -53,7 +65,7 @@ function postMeta(post: Thing): string {
     field(post, "num_comments", (v) => counted(v, "comment")),
     formatDate(post.created_utc),
     post.over_18 === true ? "NSFW" : "",
-    field(post, "link_flair_text", (v) => `flair: ${str(v)}`),
+    field(post, "link_flair_text", (v) => `flair: ${text(v)}`),
   );
 }
 
@@ -67,9 +79,9 @@ export function renderPosts(data: unknown): string {
   if (posts.length === 0) return "No posts matched.";
   const lines = [`${plural(posts.length, "post")}:`, ""];
   for (const post of posts) {
-    lines.push(`- **${str(post.title) || "(no title)"}** · ${meta(`\`${bareId(post.id)}\``, postMeta(post))}`);
+    lines.push(`- **${text(post.title) || "(no title)"}** · ${meta(`\`${bareId(post.id)}\``, postMeta(post))}`);
     lines.push(...linkLines(post).map((line) => `  ${line}`));
-    const preview = clip(post.selftext, PREVIEW_MAX_CHARS).split("\n")[0];
+    const preview = excerpt(post.selftext, PREVIEW_MAX_CHARS).split("\n")[0];
     if (preview) lines.push(`  ${preview}`);
   }
   return withFreshness(lines, posts);
@@ -94,7 +106,7 @@ export function renderComments(data: unknown): string {
     );
     const link = commentLink(comment);
     if (link) lines.push(`  ${link}`);
-    const body = clip(comment.body, BODY_MAX_CHARS);
+    const body = excerpt(comment.body, BODY_MAX_CHARS);
     if (body) lines.push(`  ${indent(body, "  ")}`);
   }
   return withFreshness(lines, comments);
@@ -129,7 +141,7 @@ function treeLines(nodes: Thing[], depth: number, sort: CommentSort, out: string
       formatDate(data.created_utc),
       `\`${bareId(data.id)}\``,
     );
-    out.push(`${pad}- ${header}: ${indent(clip(data.body, BODY_MAX_CHARS), `${pad}  `)}`);
+    out.push(`${pad}- ${header}: ${indent(excerpt(data.body, BODY_MAX_CHARS), `${pad}  `)}`);
     const replies = data.replies as Thing | undefined;
     if (replies && typeof replies === "object") {
       treeLines(asList((replies.data as Thing | undefined)?.children), depth + 1, sort, out, rendered);
@@ -138,9 +150,9 @@ function treeLines(nodes: Thing[], depth: number, sort: CommentSort, out: string
 }
 
 export function renderThread(post: Thing, tree: unknown, { sort = "tree" as CommentSort, includeComments = true } = {}): string {
-  const lines = [`# ${str(post.title) || "(no title)"}`, "", meta(`\`${bareId(post.id)}\``, postMeta(post))];
+  const lines = [`# ${text(post.title) || "(no title)"}`, "", meta(`\`${bareId(post.id)}\``, postMeta(post))];
   lines.push(...linkLines(post));
-  const selftext = clip(post.selftext, SELFTEXT_MAX_CHARS);
+  const selftext = excerpt(post.selftext, SELFTEXT_MAX_CHARS);
   if (selftext) lines.push("", selftext);
 
   // Everything shown, so the freshness check covers comments as well as the post.
@@ -168,33 +180,8 @@ export function renderSubreddits(data: unknown): string {
         field(sub, "id", (v) => `\`${str(v)}\``),
       )}`,
     );
-    const description = clip(sub.public_description, PREVIEW_MAX_CHARS).split("\n")[0];
+    const description = excerpt(sub.public_description, PREVIEW_MAX_CHARS).split("\n")[0];
     if (description) lines.push(`  ${description}`);
-  }
-  return lines.join("\n");
-}
-
-export function renderUsers(data: unknown): string {
-  const users = asList(data);
-  if (users.length === 0) return "No users matched.";
-  const lines = [`${plural(users.length, "user")}:`, ""];
-  for (const entry of users) {
-    // Arctic Shift's own key for the aggregate user stats.
-    const stats = (entry["_meta"] ?? {}) as Thing;
-    const times = (keys: string[]) => keys.map((key) => Number(stats[key])).filter((t) => Number.isFinite(t) && t > 0);
-    const first = times(["earliest_post_at", "earliest_comment_at"]);
-    const last = times(["last_post_at", "last_comment_at"]);
-    lines.push(
-      `- ${meta(
-        `**${user(entry)}**`,
-        field(entry, "id", (v) => `\`${str(v)}\``),
-        field(stats, "total_karma", (v) => `${num(v)} karma (${num(stats.post_karma)} post, ${num(stats.comment_karma)} comment)`),
-        field(stats, "num_posts", (v) => counted(v, "post")),
-        field(stats, "num_comments", (v) => counted(v, "comment")),
-        first.length ? `first active ${formatDate(Math.min(...first), { time: false })}` : "",
-        last.length ? `last active ${formatDate(Math.max(...last), { time: false })}` : "",
-      )}`,
-    );
   }
   return lines.join("\n");
 }
@@ -221,40 +208,19 @@ function bucketLabel(start: unknown, frequency: string | undefined): string {
 }
 
 function countLabel(row: Thing, group: CountGroup | undefined, frequency: string | undefined): string {
-  // Search aggregates by author or subreddit name the group `key`; interaction endpoints name it after the group.
-  const author = row.author ?? (group === "author" ? row.key : undefined);
-  if (author != null) return user({ author });
-  const subreddit = row.subreddit ?? (group === "subreddit" ? row.key : undefined);
-  if (subreddit != null) return `r/${str(subreddit)}`;
+  if (group === "author") return user({ author: row.key });
+  if (group === "subreddit") return `r/${str(row.key)}`;
   return bucketLabel(row.created_utc ?? row.key, frequency);
 }
 
-// Counts arrive as strings from search aggregates and as numbers from interaction endpoints.
+// Counts arrive as strings.
 const countValue = (row: Thing) => (row.count != null && Number.isFinite(Number(row.count)) ? num(Number(row.count)) : "?");
 
-/** Rows of `{ <author|subreddit|created_utc|key>: ..., count }` from the aggregate and interaction endpoints. */
+/** Rows of `{ key | created_utc, count }` from the search aggregate endpoints. */
 export function renderCounts(data: unknown, { group, frequency }: { group?: CountGroup; frequency?: string } = {}): string {
   const rows = asList(data);
   if (rows.length === 0) return "No results.";
   return [`${plural(rows.length, "row")}:`, "", ...rows.map((row) => `- ${countLabel(row, group, frequency)}: ${countValue(row)}`)].join("\n");
-}
-
-export function renderInteractionList(data: unknown): string {
-  const rows = asList(data);
-  if (rows.length === 0) return "No interactions found.";
-  return [
-    `${plural(rows.length, "interaction")}:`,
-    "",
-    ...rows.map(
-      (row) =>
-        `- ${meta(
-          str(row.created_utc),
-          user(row),
-          str(row.interaction_type),
-          field(row, "id", (v) => `\`${str(v)}\``),
-        )}`,
-    ),
-  ].join("\n");
 }
 
 export function renderTimeSeries(data: unknown): string {
@@ -263,32 +229,68 @@ export function renderTimeSeries(data: unknown): string {
   return [`${plural(points.length, "data point")}:`, "", ...points.map((point) => `- ${formatDate(point.date).replace(" 00:00 UTC", "")}: ${num(point.value)}`)].join("\n");
 }
 
-export function renderRules(data: unknown): string {
-  const subreddits = asList(data);
-  if (subreddits.length === 0) return "No rules found.";
-  const lines: string[] = [];
-  for (const sub of subreddits) {
-    const rules = asList(sub.rules);
-    lines.push(`## r/${str(sub.subreddit)}`, "");
-    if (rules.length === 0) lines.push("_No rules._");
-    rules.forEach((rule, i) => {
-      lines.push(`${i + 1}. **${str(rule.short_name)}**${rule.kind ? ` (applies to: ${str(rule.kind)})` : ""}`);
-      const description = clip(rule.description, BODY_MAX_CHARS);
-      if (description) lines.push(`   ${indent(description, "   ")}`);
-    });
-    lines.push("");
-  }
-  return lines.join("\n").trimEnd();
+export const SUBREDDIT_SECTIONS = ["about", "rules", "wiki"] as const;
+export type SubredditSection = (typeof SUBREDDIT_SECTIONS)[number];
+/** What get_subreddit_info fetched: the subreddit record (null if unknown), its rules, and wiki page paths or pages. */
+export type SubredditInfo = Partial<Record<SubredditSection, unknown>>;
+
+function renderAbout(data: unknown): string {
+  if (typeof data !== "object" || data === null) return "## About\n\n_Not in the archive. Check the name, or find it with search_subreddits._";
+  const sub = data as Thing;
+  // Arctic Shift's own key for the archive's post and comment counts.
+  const stats = (sub["_meta"] ?? {}) as Thing;
+  const lines = ["## About", ""];
+  const title = text(sub.title).trim();
+  if (title) lines.push(`_${title}_`, "");
+  lines.push(
+    meta(
+      field(sub, "subscribers", (v) => counted(v, "subscriber")),
+      field(sub, "created_utc", (v) => `created ${formatDate(v, { time: false })}`),
+      sub.over18 ? "NSFW" : "",
+      sub.subreddit_type && sub.subreddit_type !== "public" ? str(sub.subreddit_type) : "",
+      field(stats, "num_posts", (v) => `${counted(v, "post")} archived`),
+      field(stats, "num_comments", (v) => `${counted(v, "comment")} archived`),
+      field(sub, "retrieved_on", (v) => `details as of ${formatDate(v, { time: false })}`),
+    ),
+  );
+  const description = excerpt(sub.description || sub.public_description, SELFTEXT_MAX_CHARS);
+  if (description) lines.push("", description);
+  return lines.join("\n");
 }
 
-export function renderWikis(data: unknown): string {
+function renderRules(data: unknown): string {
+  const rules = asList(data);
+  if (rules.length === 0) return "## Rules\n\n_No rules found._";
+  const lines = ["## Rules", ""];
+  rules.forEach((rule, i) => {
+    lines.push(`${i + 1}. **${text(rule.short_name)}**${rule.kind ? ` (applies to: ${str(rule.kind)})` : ""}`);
+    const description = excerpt(rule.description, BODY_MAX_CHARS);
+    if (description) lines.push(`   ${indent(description, "   ")}`);
+  });
+  return lines.join("\n");
+}
+
+/** Wiki pages, noting first, so truncation cannot drop it, which `requested` paths Arctic Shift has no page for. */
+function renderWikis(data: unknown, requested: string[]): string {
   const pages = asList(data);
-  if (pages.length === 0) return "No wiki pages found.";
-  return pages.map((page) => `## ${str(page.path)}\n\n${normalizeNewlines(page.content).trim()}`).join("\n\n");
+  const found = new Set(pages.map((page) => str(page.path).toLowerCase()));
+  const missing = requested.filter((path) => !found.has(path.toLowerCase()));
+  const sections = pages.map((page) => `## ${str(page.path)}\n\n${text(page.content).trim()}`);
+  if (missing.length > 0) sections.unshift(`_Not found: ${missing.join(", ")}_`);
+  return sections.join("\n\n");
 }
 
-export function renderWikiPaths(data: unknown): string {
+function renderWikiPaths(data: unknown): string {
   const paths = asList(data);
-  if (paths.length === 0) return "No wiki pages found.";
-  return [`${plural(paths.length, "wiki page")}:`, "", ...paths.map((path) => `- ${str(path)}`)].join("\n");
+  if (paths.length === 0) return "## Wiki\n\n_No wiki pages found._";
+  return ["## Wiki", "", `${plural(paths.length, "page")} (read them with wiki_pages):`, "", ...paths.map((path) => `- ${str(path)}`)].join("\n");
+}
+
+/** The sections get_subreddit_info fetched, under one heading; the wiki is either page paths or the `wikiPaths` read. */
+export function renderSubredditInfo(name: string, { about, rules, wiki }: SubredditInfo, wikiPaths?: string[]): string {
+  const sections = [`# r/${name}`];
+  if (about !== undefined) sections.push(renderAbout(about));
+  if (rules !== undefined) sections.push(renderRules(rules));
+  if (wiki !== undefined) sections.push(wikiPaths ? renderWikis(wiki, wikiPaths) : renderWikiPaths(wiki));
+  return sections.join("\n\n");
 }

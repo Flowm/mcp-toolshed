@@ -13,6 +13,17 @@ export const indent = (text: string, pad: string) => text.replaceAll(/\n(?!\n|$)
 
 export const normalizeNewlines = (text: unknown) => str(text).replaceAll("\r\n", "\n");
 
+const NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+/** Decodes HTML entities in one pass, so an escaped entity (&amp;lt;) becomes its text (&lt;); unknown ones stay as they are. */
+export function decodeEntities(text: string): string {
+  return text.replaceAll(/&(?:#(\d+)|#x([\da-f]+)|([a-z]+));/gi, (entity, decimal?: string, hex?: string, name?: string) => {
+    if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? entity;
+    const code = decimal ? Number(decimal) : Number.parseInt(hex ?? "", 16);
+    return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+  });
+}
+
 export function clip(text: unknown, limit: number): string {
   const trimmed = normalizeNewlines(text).trim();
   return trimmed.length <= limit ? trimmed : `${trimmed.slice(0, limit).trimEnd()} … [truncated]`;

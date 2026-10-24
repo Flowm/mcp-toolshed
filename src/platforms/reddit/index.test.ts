@@ -48,16 +48,12 @@ describe("MCP server", () => {
   it("lists every tool as read-only, each with format and max_chars", async () => {
     const { tools } = await rpc("tools/list");
     expect(tools.map((t: { name: string }) => t.name).toSorted()).toEqual([
-      "get_by_ids",
-      "get_subreddit_rules",
-      "get_subreddit_wikis",
+      "get_subreddit_info",
       "get_thread",
       "get_time_series",
-      "get_user_interactions",
       "search_comments",
       "search_posts",
       "search_subreddits",
-      "search_users",
     ]);
     for (const tool of tools) {
       expect(tool.annotations.readOnlyHint).toBe(true);
@@ -104,11 +100,12 @@ describe("MCP server", () => {
   });
 
   it.each([
-    ["get_by_ids", { kind: "comments", ids: ["abc"], format: "json" }, "/api/comments/ids", { ids: "t1_abc" }],
-    ["get_by_ids", { kind: "subreddits", ids: ["2qh1i"], format: "json" }, "/api/subreddits/ids", { ids: "2qh1i" }],
-    ["get_user_interactions", { author: "spez", with: "users_list" }, "/api/users/interactions/users/list", { author: "spez" }],
-    ["get_subreddit_wikis", { subreddit: "askreddit", list_only: true }, "/api/subreddits/wikis/list", { subreddit: "askreddit" }],
-    ["get_subreddit_wikis", { paths: ["/r/travel/wiki/faq"] }, "/api/subreddits/wikis", { paths: "/r/travel/wiki/faq" }],
+    [
+      "get_subreddit_info",
+      { subreddit: "r/travel", wiki_pages: ["faq", "/wiki/visa/", "https://www.reddit.com/r/solotravel/wiki/index"] },
+      "/api/subreddits/wikis",
+      { paths: "/r/travel/wiki/faq,/r/travel/wiki/visa,/r/solotravel/wiki/index" },
+    ],
   ])("routes %s to the matching endpoint", async (name, args, path, params) => {
     const api = stubApi();
     const { isError } = await callTool(name, args);
@@ -129,6 +126,73 @@ describe("MCP server", () => {
     expect(api.requests()).toEqual([{ path: "/api/comments/search/aggregate", params: { link_id: "t3_7cff0b", aggregate: "created_utc", frequency: "day" } }]);
   });
 
+  it("ranks the newest matches by comments and says how many it ranked", async () => {
+    const api = stubApi({
+      "/api/posts/search": [
+        { id: "new", title: "New", num_comments: 1, created_utc: 3 },
+        { id: "busy", title: "Busy", num_comments: 90, created_utc: 2 },
+        { id: "mid", title: "Mid", num_comments: 5, created_utc: 1 },
+      ],
+    });
+    const { text } = await callTool("search_posts", { subreddit: "espresso", query: "grinder", rank_by: "comments", limit: 2 });
+    expect(text).toMatch(/^_Ranked by comments among all 3 matches\._\n\n2 posts:/);
+    expect(text.indexOf("**Busy**")).toBeLessThan(text.indexOf("**Mid**"));
+    expect(text).not.toContain("**New**");
+    expect(api.requests()[0]?.params).toMatchObject({ subreddit: "espresso", limit: "100" });
+  });
+
+  it("says when ranking only covered the newest page of matches", async () => {
+    stubApi({ "/api/posts/search": Array.from({ length: 100 }, (_, i) => ({ id: `p${i}`, score: i, created_utc: 100 - i })) });
+    const { text } = await callTool("search_posts", { subreddit: "espresso", query: "grinder", rank_by: "score" });
+    expect(text).toContain("_Ranked by score among the 100 newest matches; narrow after/before to rank another period._");
+    expect(text).toContain("25 posts:");
+  });
+
+  it("searches each subreddit and merges the listings by date", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const subreddit = new URL(String(input)).searchParams.get("subreddit");
+      const posts = {
+        espresso: [
+          { id: "e1", created_utc: 30 },
+          { id: "e2", created_utc: 10 },
+        ],
+        coffee: [{ id: "c1", created_utc: 20 }],
+      }[subreddit ?? ""];
+      return new Response(JSON.stringify({ data: posts }));
+    });
+    const { text } = await callTool("search_posts", { subreddit: ["espresso", "coffee"], query: "grinder", limit: 2, fields: ["id"], format: "json" });
+    expect(JSON.parse(text).map((post: { id: string }) => post.id)).toEqual(["e1", "c1"]);
+    const params = fetch.mock.calls.map(([input]) => Object.fromEntries(new URL(String(input)).searchParams));
+    expect(params).toEqual([
+      { subreddit: "espresso", query: "grinder", limit: "2", fields: "id,created_utc" },
+      { subreddit: "coffee", query: "grinder", limit: "2", fields: "id,created_utc" },
+    ]);
+  });
+
+  it("runs at most two subreddit searches at a time", async () => {
+    let running = 0;
+    let most = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      most = Math.max(most, ++running);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running--;
+      return new Response('{"data":[]}');
+    });
+    await callTool("search_posts", { subreddit: ["a", "b", "c", "d", "e"], query: "x" });
+    expect(most).toBe(2);
+  });
+
+  it("keeps the other subreddits' results when one search fails", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      new URL(String(input)).searchParams.get("subreddit") === "coffee"
+        ? new Response('{"error":"key is not a valid value"}', { status: 400 })
+        : new Response(JSON.stringify({ data: [{ id: "e1", title: "Espresso" }] })),
+    );
+    const { text, isError } = await callTool("search_posts", { subreddit: ["espresso", "coffee"], query: "grinder" });
+    expect(isError).toBe(false);
+    expect(text).toMatch(/^_r\/coffee is left out: Arctic Shift error \(HTTP 400\)[^\n]*_\n\n1 post:/);
+  });
+
   it.each([
     [{ subreddit: "x", frequency: "day", min_count: 2 }, "frequency and min_count only apply with group_by."],
     [{ subreddit: "x", group_by: "author", frequency: "day" }, "frequency only applies with group_by=created_utc."],
@@ -136,6 +200,9 @@ describe("MCP server", () => {
     [{ subreddit: "x", limit: 500 }, "limit must be 1-100"],
     [{ subreddit: "x", group_by: "author", limit: "auto" }, 'limit "auto" does not apply with group_by'],
     [{ subreddit: "x", group_by: "created_utc" }, "group_by=created_utc needs frequency"],
+    [{ subreddit: "x", group_by: "author", rank_by: "score" }, "rank_by only applies with a listing, without group_by."],
+    [{ subreddit: ["x", "y"], group_by: "author" }, "Several subreddits only apply when listing"],
+    [{ subreddit: "x", rank_by: "comments", limit: "auto" }, 'limit "auto" does not apply with rank_by'],
   ])("rejects inconsistent search options %j before calling the API", async (args, message) => {
     const api = stubApi();
     const result = await callTool("search_posts", args);
@@ -143,12 +210,32 @@ describe("MCP server", () => {
     expect(api.fetch).not.toHaveBeenCalled();
   });
 
-  it.each([
-    [{ author: "spez", with: "subreddits", subreddit: "pics" }, "subreddit only applies with with=users or with=users_list."],
-    [{ author: "spez", with: "users", weight_posts: 2, weight_comments: 1 }, "weight_posts and weight_comments only apply with with=subreddits."],
-  ])("rejects interaction options of another mode %j", async (args, message) => {
+  it("gets a subreddit's about, rules and wiki page list in one call", async () => {
+    const api = stubApi({
+      "/api/subreddits/search": [{ display_name: "travel", subscribers: 2 }],
+      "/api/subreddits/rules": [{ subreddit: "travel", rules: [{ short_name: "Be kind" }] }],
+      "/api/subreddits/wikis/list": ["/r/travel/wiki/faq"],
+    });
+    const { text } = await callTool("get_subreddit_info", { subreddit: "r/travel" });
+    expect(text).toBe("# r/travel\n\n## About\n\n2 subscribers\n\n## Rules\n\n1. **Be kind**\n\n## Wiki\n\n1 page (read them with wiki_pages):\n\n- /r/travel/wiki/faq");
+    expect(api.requests()).toEqual([
+      { path: "/api/subreddits/search", params: { subreddit: "travel" } },
+      { path: "/api/subreddits/rules", params: { subreddits: "travel" } },
+      { path: "/api/subreddits/wikis/list", params: { subreddit: "travel" } },
+    ]);
+  });
+
+  it("returns only the subreddit sections in include, as JSON keyed by section", async () => {
+    const api = stubApi({ "/api/subreddits/rules": [{ subreddit: "travel", rules: [{ short_name: "Be kind" }] }] });
+    const { text } = await callTool("get_subreddit_info", { subreddit: "travel", include: ["rules"], format: "json" });
+    expect(JSON.parse(text)).toEqual({ rules: [{ short_name: "Be kind" }] });
+    expect(api.requests().map((request) => request.path)).toEqual(["/api/subreddits/rules"]);
+  });
+
+  it("rejects wiki_pages when include leaves out the wiki", async () => {
     const api = stubApi();
-    expect(await callTool("get_user_interactions", args)).toEqual({ isError: true, text: message });
+    const result = await callTool("get_subreddit_info", { subreddit: "travel", include: ["rules"], wiki_pages: ["faq"] });
+    expect(result).toEqual({ isError: true, text: "wiki_pages only applies with wiki in include." });
     expect(api.fetch).not.toHaveBeenCalled();
   });
 
@@ -160,10 +247,17 @@ describe("MCP server", () => {
 
   it("returns unreadable IDs as tool errors without calling the API", async () => {
     const api = stubApi();
-    const result = await callTool("get_by_ids", { kind: "posts", ids: ["https://example.com/x"] });
+    const result = await callTool("search_comments", { link_id: "https://example.com/x" });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("example.com is not a Reddit URL");
     expect(api.fetch).not.toHaveBeenCalled();
+  });
+
+  it("accepts numbers and booleans sent as strings", async () => {
+    const api = stubApi();
+    const result = await callTool("search_posts", { subreddit: "espresso", query: "Profitec Go", limit: "25", max_chars: "15000", over_18: "false" });
+    expect(result.isError).toBe(false);
+    expect(api.requests()).toEqual([{ path: "/api/posts/search", params: expect.objectContaining({ limit: "25", over_18: "false" }) }]);
   });
 
   it("rejects out-of-range arguments before calling the API", async () => {
