@@ -1,7 +1,7 @@
 // Compact markdown for model consumption. A raw post carries ~90 fields and a busy
 // comment tree is hundreds of KB of JSON; these renderers keep the handful that matter.
 
-import { asList, clip, counted, field, formatDate, indent, meta, normalizeNewlines, num, plural, str, type Thing } from "../../core/markdown.ts";
+import { asList, clip, counted, decodeEntities, field, formatDate, indent, meta, normalizeNewlines, num, plural, str, type Thing } from "../../core/markdown.ts";
 
 const BODY_MAX_CHARS = 1500;
 const SELFTEXT_MAX_CHARS = 4000;
@@ -13,6 +13,18 @@ export const FRESHNESS = "Scores and comment counts of items posted under 36h ag
 export const FRESHNESS_NOTE = `_Note: ${FRESHNESS}_`;
 
 const bareId = (id: unknown): string => str(id).replace(/^t[13]_/, "");
+
+/**
+ * Text someone wrote, as Reddit shows it. Older posts and comments, and some wiki pages, arrive HTML-escaped, and
+ * Reddit's editor marks empty paragraphs with a zero-width space (&amp;#x200B; once escaped); those are dropped
+ * with the blank lines they leave.
+ */
+const text = (value: unknown): string =>
+  decodeEntities(normalizeNewlines(value))
+    .replaceAll(/&#x200b;|\u200b/gi, "")
+    .replaceAll(/\n\s*\n/g, "\n\n");
+
+const excerpt = (value: unknown, limit: number) => clip(text(value), limit);
 
 function isFresh(thing: Thing): boolean {
   const created = Number(thing.created_utc);
@@ -35,7 +47,7 @@ function commentLink(comment: Thing): string {
 }
 
 function outboundLink(post: Thing): string {
-  const url = str(post.url);
+  const url = text(post.url);
   return url && !/^https?:\/\/(?:[\w-]+\.)?(?:reddit\.com|redd\.it)\//.test(url) ? url : "";
 }
 
@@ -53,7 +65,7 @@ function postMeta(post: Thing): string {
     field(post, "num_comments", (v) => counted(v, "comment")),
     formatDate(post.created_utc),
     post.over_18 === true ? "NSFW" : "",
-    field(post, "link_flair_text", (v) => `flair: ${str(v)}`),
+    field(post, "link_flair_text", (v) => `flair: ${text(v)}`),
   );
 }
 
@@ -67,9 +79,9 @@ export function renderPosts(data: unknown): string {
   if (posts.length === 0) return "No posts matched.";
   const lines = [`${plural(posts.length, "post")}:`, ""];
   for (const post of posts) {
-    lines.push(`- **${str(post.title) || "(no title)"}** · ${meta(`\`${bareId(post.id)}\``, postMeta(post))}`);
+    lines.push(`- **${text(post.title) || "(no title)"}** · ${meta(`\`${bareId(post.id)}\``, postMeta(post))}`);
     lines.push(...linkLines(post).map((line) => `  ${line}`));
-    const preview = clip(post.selftext, PREVIEW_MAX_CHARS).split("\n")[0];
+    const preview = excerpt(post.selftext, PREVIEW_MAX_CHARS).split("\n")[0];
     if (preview) lines.push(`  ${preview}`);
   }
   return withFreshness(lines, posts);
@@ -94,7 +106,7 @@ export function renderComments(data: unknown): string {
     );
     const link = commentLink(comment);
     if (link) lines.push(`  ${link}`);
-    const body = clip(comment.body, BODY_MAX_CHARS);
+    const body = excerpt(comment.body, BODY_MAX_CHARS);
     if (body) lines.push(`  ${indent(body, "  ")}`);
   }
   return withFreshness(lines, comments);
@@ -129,7 +141,7 @@ function treeLines(nodes: Thing[], depth: number, sort: CommentSort, out: string
       formatDate(data.created_utc),
       `\`${bareId(data.id)}\``,
     );
-    out.push(`${pad}- ${header}: ${indent(clip(data.body, BODY_MAX_CHARS), `${pad}  `)}`);
+    out.push(`${pad}- ${header}: ${indent(excerpt(data.body, BODY_MAX_CHARS), `${pad}  `)}`);
     const replies = data.replies as Thing | undefined;
     if (replies && typeof replies === "object") {
       treeLines(asList((replies.data as Thing | undefined)?.children), depth + 1, sort, out, rendered);
@@ -138,9 +150,9 @@ function treeLines(nodes: Thing[], depth: number, sort: CommentSort, out: string
 }
 
 export function renderThread(post: Thing, tree: unknown, { sort = "tree" as CommentSort, includeComments = true } = {}): string {
-  const lines = [`# ${str(post.title) || "(no title)"}`, "", meta(`\`${bareId(post.id)}\``, postMeta(post))];
+  const lines = [`# ${text(post.title) || "(no title)"}`, "", meta(`\`${bareId(post.id)}\``, postMeta(post))];
   lines.push(...linkLines(post));
-  const selftext = clip(post.selftext, SELFTEXT_MAX_CHARS);
+  const selftext = excerpt(post.selftext, SELFTEXT_MAX_CHARS);
   if (selftext) lines.push("", selftext);
 
   // Everything shown, so the freshness check covers comments as well as the post.
@@ -168,7 +180,7 @@ export function renderSubreddits(data: unknown): string {
         field(sub, "id", (v) => `\`${str(v)}\``),
       )}`,
     );
-    const description = clip(sub.public_description, PREVIEW_MAX_CHARS).split("\n")[0];
+    const description = excerpt(sub.public_description, PREVIEW_MAX_CHARS).split("\n")[0];
     if (description) lines.push(`  ${description}`);
   }
   return lines.join("\n");
@@ -228,7 +240,7 @@ function renderAbout(data: unknown): string {
   // Arctic Shift's own key for the archive's post and comment counts.
   const stats = (sub["_meta"] ?? {}) as Thing;
   const lines = ["## About", ""];
-  const title = str(sub.title).trim();
+  const title = text(sub.title).trim();
   if (title) lines.push(`_${title}_`, "");
   lines.push(
     meta(
@@ -241,7 +253,7 @@ function renderAbout(data: unknown): string {
       field(sub, "retrieved_on", (v) => `details as of ${formatDate(v, { time: false })}`),
     ),
   );
-  const description = clip(sub.description || sub.public_description, SELFTEXT_MAX_CHARS);
+  const description = excerpt(sub.description || sub.public_description, SELFTEXT_MAX_CHARS);
   if (description) lines.push("", description);
   return lines.join("\n");
 }
@@ -251,8 +263,8 @@ function renderRules(data: unknown): string {
   if (rules.length === 0) return "## Rules\n\n_No rules found._";
   const lines = ["## Rules", ""];
   rules.forEach((rule, i) => {
-    lines.push(`${i + 1}. **${str(rule.short_name)}**${rule.kind ? ` (applies to: ${str(rule.kind)})` : ""}`);
-    const description = clip(rule.description, BODY_MAX_CHARS);
+    lines.push(`${i + 1}. **${text(rule.short_name)}**${rule.kind ? ` (applies to: ${str(rule.kind)})` : ""}`);
+    const description = excerpt(rule.description, BODY_MAX_CHARS);
     if (description) lines.push(`   ${indent(description, "   ")}`);
   });
   return lines.join("\n");
@@ -263,7 +275,7 @@ function renderWikis(data: unknown, requested: string[]): string {
   const pages = asList(data);
   const found = new Set(pages.map((page) => str(page.path).toLowerCase()));
   const missing = requested.filter((path) => !found.has(path.toLowerCase()));
-  const sections = pages.map((page) => `## ${str(page.path)}\n\n${normalizeNewlines(page.content).trim()}`);
+  const sections = pages.map((page) => `## ${str(page.path)}\n\n${text(page.content).trim()}`);
   if (missing.length > 0) sections.unshift(`_Not found: ${missing.join(", ")}_`);
   return sections.join("\n\n");
 }

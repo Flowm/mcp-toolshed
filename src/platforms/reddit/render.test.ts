@@ -46,6 +46,11 @@ describe("renderPosts", () => {
     expect(text).not.toContain("Link:");
   });
 
+  it("decodes the HTML escaping of older titles, flairs and links", () => {
+    const old = { id: "abc", title: "Under &gt;1000$ &amp; quiet", link_flair_text: "Tips &amp; Tricks", url: "https://youtube.test/watch?a=1&amp;v=2" };
+    expect(renderPosts([old])).toBe("1 post:\n\n- **Under >1000$ & quiet** · `abc` · flair: Tips & Tricks\n  Link: https://youtube.test/watch?a=1&v=2");
+  });
+
   it("skips fields that were not requested", () => {
     expect(renderPosts([{ id: "abc", title: "T" }])).toBe("1 post:\n\n- **T** · `abc`");
   });
@@ -80,6 +85,13 @@ describe("renderComments", () => {
     const text = renderComments([{ id: "c", author: "a", score: 1, body: "para 1\n\npara 2", link_id: "t3_p", parent_id: "t3_p" }]);
     expect(text).toContain("· 1 point ·");
     expect(text).toContain("  para 1\n\n  para 2");
+  });
+
+  it("decodes the HTML escaping of older comments and drops empty-paragraph markers", () => {
+    const text = renderComments([
+      { id: "c", author: "a", body: "&gt; quote\n\n&amp;#x200B;\n\nSee [this](https://x.test/?a=1&amp;b=2) &lt;3", link_id: "t3_p", parent_id: "t3_p" },
+    ]);
+    expect(text).toContain("  > quote\n\n  See [this](https://x.test/?a=1&b=2) <3");
   });
 
   it("renders deleted authors and clips long bodies", () => {
