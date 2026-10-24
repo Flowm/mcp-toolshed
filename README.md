@@ -14,14 +14,14 @@ Each server runs on Cloudflare Workers at `/<platform>/mcp`, has only read-only 
 
 Reddit posts, comments and subreddits from the [Arctic Shift](https://arctic-shift.photon-reddit.com) archive ([API docs](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md)).
 
-| Tool                 | What it does                                                                                                                                                          |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `get_thread`         | Reads a post and its comment tree from whatever a user pastes: a post or comment URL, a share link (`/r/<sub>/s/<code>`), a redd.it link or an ID                     |
-| `search_posts`       | Finds posts by subreddit, author, keywords, flair, linked URL or date; with `group_by`, counts them per author, subreddit or date                                     |
-| `search_comments`    | Finds comments by subreddit, author, post, parent comment, text or date; with `group_by`, counts them the same way. An author alone gives that user's comment history |
-| `search_subreddits`  | Finds subreddits by name, name prefix, subscriber count, creation date or NSFW flag                                                                                   |
-| `get_subreddit_info` | Gets a subreddit's description and stats, rules and wiki, or any of them; lists the wiki pages or reads them by name, path or URL                                     |
-| `get_time_series`    | Shows post and comment counts, total scores or subscribers over time, Reddit-wide or for one subreddit                                                                |
+| Tool                 | What it does                                                                                                                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `get_thread`         | Reads a post and its comment tree from whatever a user pastes: a post or comment URL, a share link (`/r/<sub>/s/<code>`), a redd.it link or an ID                                                |
+| `search_posts`       | Finds posts in one or several subreddits by author, keywords, flair, linked URL or date, newest first or ranked by comments or score; with `group_by`, counts them per author, subreddit or date |
+| `search_comments`    | Finds comments in one or several subreddits by author, post, parent comment, text or date; with `group_by`, counts them the same way. An author alone gives that user's comment history          |
+| `search_subreddits`  | Finds subreddits by name, name prefix, subscriber count, creation date or NSFW flag                                                                                                              |
+| `get_subreddit_info` | Gets a subreddit's description and stats, rules and wiki, or any of them; lists the wiki pages or reads them by name, path or URL                                                                |
+| `get_time_series`    | Shows post and comment counts, total scores or subscribers over time, Reddit-wide or for one subreddit                                                                                           |
 
 Post and comment filters such as `link_id` and `parent_id` accept Reddit URLs as well as IDs.
 

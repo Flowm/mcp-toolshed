@@ -126,6 +126,73 @@ describe("MCP server", () => {
     expect(api.requests()).toEqual([{ path: "/api/comments/search/aggregate", params: { link_id: "t3_7cff0b", aggregate: "created_utc", frequency: "day" } }]);
   });
 
+  it("ranks the newest matches by comments and says how many it ranked", async () => {
+    const api = stubApi({
+      "/api/posts/search": [
+        { id: "new", title: "New", num_comments: 1, created_utc: 3 },
+        { id: "busy", title: "Busy", num_comments: 90, created_utc: 2 },
+        { id: "mid", title: "Mid", num_comments: 5, created_utc: 1 },
+      ],
+    });
+    const { text } = await callTool("search_posts", { subreddit: "espresso", query: "grinder", rank_by: "comments", limit: 2 });
+    expect(text).toMatch(/^_Ranked by comments among all 3 matches\._\n\n2 posts:/);
+    expect(text.indexOf("**Busy**")).toBeLessThan(text.indexOf("**Mid**"));
+    expect(text).not.toContain("**New**");
+    expect(api.requests()[0]?.params).toMatchObject({ subreddit: "espresso", limit: "100" });
+  });
+
+  it("says when ranking only covered the newest page of matches", async () => {
+    stubApi({ "/api/posts/search": Array.from({ length: 100 }, (_, i) => ({ id: `p${i}`, score: i, created_utc: 100 - i })) });
+    const { text } = await callTool("search_posts", { subreddit: "espresso", query: "grinder", rank_by: "score" });
+    expect(text).toContain("_Ranked by score among the 100 newest matches; narrow after/before to rank another period._");
+    expect(text).toContain("25 posts:");
+  });
+
+  it("searches each subreddit and merges the listings by date", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const subreddit = new URL(String(input)).searchParams.get("subreddit");
+      const posts = {
+        espresso: [
+          { id: "e1", created_utc: 30 },
+          { id: "e2", created_utc: 10 },
+        ],
+        coffee: [{ id: "c1", created_utc: 20 }],
+      }[subreddit ?? ""];
+      return new Response(JSON.stringify({ data: posts }));
+    });
+    const { text } = await callTool("search_posts", { subreddit: ["espresso", "coffee"], query: "grinder", limit: 2, fields: ["id"], format: "json" });
+    expect(JSON.parse(text).map((post: { id: string }) => post.id)).toEqual(["e1", "c1"]);
+    const params = fetch.mock.calls.map(([input]) => Object.fromEntries(new URL(String(input)).searchParams));
+    expect(params).toEqual([
+      { subreddit: "espresso", query: "grinder", limit: "2", fields: "id,created_utc" },
+      { subreddit: "coffee", query: "grinder", limit: "2", fields: "id,created_utc" },
+    ]);
+  });
+
+  it("runs at most two subreddit searches at a time", async () => {
+    let running = 0;
+    let most = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      most = Math.max(most, ++running);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running--;
+      return new Response('{"data":[]}');
+    });
+    await callTool("search_posts", { subreddit: ["a", "b", "c", "d", "e"], query: "x" });
+    expect(most).toBe(2);
+  });
+
+  it("keeps the other subreddits' results when one search fails", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      new URL(String(input)).searchParams.get("subreddit") === "coffee"
+        ? new Response('{"error":"key is not a valid value"}', { status: 400 })
+        : new Response(JSON.stringify({ data: [{ id: "e1", title: "Espresso" }] })),
+    );
+    const { text, isError } = await callTool("search_posts", { subreddit: ["espresso", "coffee"], query: "grinder" });
+    expect(isError).toBe(false);
+    expect(text).toMatch(/^_r\/coffee is left out: Arctic Shift error \(HTTP 400\)[^\n]*_\n\n1 post:/);
+  });
+
   it.each([
     [{ subreddit: "x", frequency: "day", min_count: 2 }, "frequency and min_count only apply with group_by."],
     [{ subreddit: "x", group_by: "author", frequency: "day" }, "frequency only applies with group_by=created_utc."],
@@ -133,6 +200,9 @@ describe("MCP server", () => {
     [{ subreddit: "x", limit: 500 }, "limit must be 1-100"],
     [{ subreddit: "x", group_by: "author", limit: "auto" }, 'limit "auto" does not apply with group_by'],
     [{ subreddit: "x", group_by: "created_utc" }, "group_by=created_utc needs frequency"],
+    [{ subreddit: "x", group_by: "author", rank_by: "score" }, "rank_by only applies with a listing, without group_by."],
+    [{ subreddit: ["x", "y"], group_by: "author" }, "Several subreddits only apply when listing"],
+    [{ subreddit: "x", rank_by: "comments", limit: "auto" }, 'limit "auto" does not apply with rank_by'],
   ])("rejects inconsistent search options %j before calling the API", async (args, message) => {
     const api = stubApi();
     const result = await callTool("search_posts", args);

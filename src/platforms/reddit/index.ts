@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { Params } from "../../core/client.ts";
 import { flag, numeric } from "../../core/input.ts";
-import { asList } from "../../core/markdown.ts";
+import { asList, type Thing } from "../../core/markdown.ts";
 import { DEFAULT_MAX_CHARS, fieldsFor, limitChars, type Output, outputSettings, type Render, renderJson, respond } from "../../core/output.ts";
 import type { Platform } from "../../core/platform.ts";
 import { apiParams, fetchAndRender, InputError, onlyWith, readOnly, toolResult } from "../../core/tool.ts";
@@ -35,10 +35,21 @@ const fields = z.array(z.string()).optional().describe("Only fetch these fields.
 
 const output = outputSettings;
 
+// Searches of several subreddits run one per subreddit; Arctic Shift has no multi-subreddit filter.
+const MAX_SUBREDDITS = 5;
+// Arctic Shift throttles bursts of heavy queries, so a fan-out runs this many searches at a time.
+const FAN_OUT_CONCURRENCY = 2;
+// rank_by ranks Arctic Shift's largest listing page per subreddit; "auto" is not allowed with keyword search.
+const RANK_WINDOW = 100;
+const RANK_FIELDS = { comments: "num_comments", score: "score" } as const;
+
 // Filters shared by post and comment search.
 const commonFilters = {
   author: z.string().optional().describe("Username (u/ prefix optional)"),
-  subreddit: z.string().optional().describe("Subreddit name (r/ prefix optional)"),
+  subreddit: z
+    .union([z.string(), z.array(z.string()).min(1).max(MAX_SUBREDDITS)])
+    .optional()
+    .describe(`Subreddit name (r/ prefix optional), or up to ${MAX_SUBREDDITS} names to search each and merge the listings`),
   author_flair_text: z.string().optional().describe("Keyword search on author flair"),
   after: date.optional().describe("Only things created after this date"),
   before: date.optional().describe("Only things created before this date"),
@@ -55,6 +66,10 @@ const postFilters = {
   query: z.string().optional().describe("Keyword search in title and selftext. Requires author or subreddit."),
   url: z.string().optional().describe("Prefix match on the linked URL"),
   url_exact: flag().optional().describe("Only exact matches for url"),
+  rank_by: z
+    .enum(["comments", "score"])
+    .optional()
+    .describe(`Listing: most comments or highest score first, among the ${RANK_WINDOW} newest matches per subreddit (oldest with sort=asc)`),
 };
 
 const commentFilters = {
@@ -75,11 +90,11 @@ const searchOptionsSchema = z.object({
     .union([numeric(z.number().int().min(1)), z.literal("auto")])
     .optional()
     .describe('Listing: 1-100 (default 25), or "auto" for 100-1000 depending on server load. With group_by: max groups (default all).'),
-  sort: z.enum(["asc", "desc"]).optional().describe("Listing: by creation date, the only order the API supports. With group_by: by count, or by date for created_utc."),
+  sort: z.enum(["asc", "desc"]).optional().describe("Listing: by creation date (search_posts can rank_by instead). With group_by: by count, or by date for created_utc."),
   fields,
   ...output,
 });
-type SearchOptions = z.infer<typeof searchOptionsSchema>;
+type SearchOptions = z.infer<typeof searchOptionsSchema> & { rank_by?: keyof typeof RANK_FIELDS };
 const searchOptions = searchOptionsSchema.shape;
 
 /** Handler for a tool that forwards its arguments to one Arctic Shift endpoint. */
@@ -98,23 +113,70 @@ async function resolveCommentFilters<T extends { link_id?: string; parent_id?: s
   };
 }
 
+/**
+ * Runs `search` for each subreddit, FAN_OUT_CONCURRENCY at a time. A subreddit that fails becomes a note and the
+ * others' results are kept; when every search fails, the first error is thrown.
+ */
+async function eachSubreddit(subreddits: (string | undefined)[], search: (subreddit?: string) => Promise<unknown>): Promise<{ results: unknown[]; notes: string[] }> {
+  // Searches share FAN_OUT_CONCURRENCY lanes; each lane starts its next search when its last one settles.
+  const lanes: Promise<unknown>[] = Array.from({ length: FAN_OUT_CONCURRENCY }, () => Promise.resolve());
+  const runs = subreddits.map((name, i) => {
+    const run = lanes[i % FAN_OUT_CONCURRENCY]!.then(() => search(name));
+    lanes[i % FAN_OUT_CONCURRENCY] = run.catch(() => undefined);
+    return run;
+  });
+  const settled = await Promise.allSettled(runs);
+  const failures = settled.flatMap((result, i) => (result.status === "rejected" ? [{ subreddit: subreddits[i], error: result.reason as unknown }] : []));
+  if (failures.length === settled.length) throw failures[0]?.error;
+  return {
+    results: settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
+    notes: failures.map(({ subreddit, error }) => `_r/${subreddit} is left out: ${error instanceof Error ? error.message : String(error)}_`),
+  };
+}
+
+const byDate = (sort: unknown) => (a: Thing, b: Thing) => (sort === "asc" ? 1 : -1) * (Number(a.created_utc) - Number(b.created_utc));
+
 /** Lists matches from `<path>`, or counts them per group via `<path>/aggregate` when group_by is set. */
-async function searchOrCount(path: string, options: SearchOptions & Params, defaults: string[], render: Render): Promise<string> {
-  const { fields: requested, group_by, frequency, min_count, ...rest } = options;
+async function searchOrCount(path: string, options: SearchOptions & { subreddit?: string | string[] } & Params, defaults: string[], render: Render): Promise<string> {
+  const { fields: requested, group_by, frequency, min_count, rank_by, subreddit, ...rest } = options;
   const filters = apiParams(rest);
+  const subreddits = Array.isArray(subreddit) ? [...new Set(subreddit)] : [subreddit];
   if (!group_by) {
     onlyWith({ frequency, min_count }, ["frequency", "min_count"], false, "group_by");
     if (typeof filters.limit === "number" && filters.limit > 100) {
       throw new InputError('limit must be 1-100 (or "auto") when listing results; larger limits only apply with group_by.');
     }
-    const data = await callApi(path, { ...filters, fields: fieldsFor(options.format, requested, defaults) });
-    return respond(data, options, render);
+    if (rank_by && filters.limit === "auto") throw new InputError(`limit "auto" does not apply with rank_by, which ranks the ${RANK_WINDOW} newest matches.`);
+    // Arctic Shift lists 25 by default; merging subreddits and ranking trim to the same.
+    const limit = options.limit ?? 25;
+    // Merging by date and ranking need their fields even when the caller narrowed fields.
+    const fetched = fieldsFor(options.format, requested, defaults);
+    const needed = [...(subreddits.length > 1 ? ["created_utc"] : []), ...(rank_by ? [RANK_FIELDS[rank_by]] : [])];
+    const { results, notes } = await eachSubreddit(subreddits, (name) =>
+      callApi(path, { ...filters, subreddit: name, limit: rank_by ? RANK_WINDOW : options.limit, fields: fetched && [...new Set([...fetched, ...needed])] }),
+    );
+    let rows = results.flatMap(asList);
+    if (subreddits.length > 1) rows.sort(byDate(filters.sort));
+    if (rank_by && rows.length > 0) {
+      const key = RANK_FIELDS[rank_by];
+      // A stable sort, so ties keep their date order.
+      rows.sort((a, b) => Number(b[key] ?? 0) - Number(a[key] ?? 0));
+      const windowFull = results.some((result) => asList(result).length === RANK_WINDOW);
+      const scope = windowFull
+        ? `the ${RANK_WINDOW} ${filters.sort === "asc" ? "oldest" : "newest"} matches${subreddits.length > 1 ? " in each subreddit" : ""}; narrow after/before to rank another period`
+        : `all ${rows.length} matches`;
+      notes.push(`_Ranked by ${rank_by} among ${scope}._`);
+    }
+    if (limit !== "auto") rows = rows.slice(0, limit);
+    return respond(rows, options, (data) => [...notes, render(data)].join("\n\n"));
   }
+  onlyWith({ rank_by }, ["rank_by"], false, "a listing, without group_by");
+  if (subreddits.length > 1) throw new InputError("Several subreddits only apply when listing; with group_by, count one subreddit per call.");
   onlyWith({ frequency }, ["frequency"], group_by === "created_utc", "group_by=created_utc");
   onlyWith({ min_count }, ["min_count"], group_by !== "created_utc", "group_by=author or group_by=subreddit");
   if (filters.limit === "auto") throw new InputError('limit "auto" does not apply with group_by; omit limit to get all groups.');
   if (group_by === "created_utc" && !frequency) throw new InputError("group_by=created_utc needs frequency (e.g. year, month, day).");
-  const data = await callApi(`${path}/aggregate`, { ...filters, aggregate: group_by, frequency, min_count });
+  const data = await callApi(`${path}/aggregate`, { ...filters, subreddit: subreddits[0], aggregate: group_by, frequency, min_count });
   return respond(data, options, (rows) => renderCounts(rows, { group: group_by, frequency }));
 }
 
@@ -175,6 +237,7 @@ function registerTools(server: McpServer): void {
       description:
         "Search archived Reddit posts by author, subreddit, date range, keywords, flair or linked URL, sorted by date. " +
         "Keyword filters (title/selftext/query) need author or subreddit set. " +
+        "For reviews or opinions, search the likely subreddits together and set rank_by=comments to find the most discussed threads, then read them with get_thread. " +
         "Set group_by to count matches per author, subreddit or date bucket instead (e.g. top posters in a subreddit, a user's posts per year).",
       inputSchema: z.object({ ...postFilters, ...searchOptions }),
       annotations: readOnly,
@@ -282,7 +345,7 @@ export const reddit: Platform = {
   instructions:
     "Read-only access to the Arctic Shift archive of Reddit. For any Reddit link, start with get_thread. " +
     "Results are compact markdown by default; pass format=json for raw records. " +
-    "Search results are sorted by date only; for most active authors or subreddits, set group_by on search_posts/search_comments. " +
+    "For most active authors or subreddits, set group_by on search_posts/search_comments. " +
     FRESHNESS,
   registerTools,
 };
