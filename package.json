@@ -29,12 +29,5 @@
     "vitest": "^5.0.5",
     "wrangler": "^4.150.0"
   },
-  "packageManager": "pnpm@12.15.0",
-  "cloudflare": {
-    "bindings": {
-      "REPOSITORY_URL": {
-        "description": "URL of your copy of this repository, sent in the User-Agent so the platforms' API operators can tell whose deployment is calling. Leave empty to send none."
-      }
-    }
-  }
+  "packageManager": "pnpm@12.15.0"
 }

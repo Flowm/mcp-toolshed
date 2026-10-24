@@ -8,10 +8,6 @@
   "main": "src/index.ts",
   "send_metrics": false,
   "preview_urls": true,
-  // Set at deploy time (CI passes its repository) and sent in the User-Agent; see src/core/client.ts.
-  "vars": {
-    "REPOSITORY_URL": "",
-  },
   "observability": {
     "enabled": true,
   },

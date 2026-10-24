@@ -92,12 +92,12 @@ Plain `pnpm deploy` is pnpm's built-in command for deploying workspace packages 
 
 ### Settings
 
-| Setting          | What it does                                                                                                                                | Locally           | CI                  | Workers Builds |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ------------------- | -------------- |
-| `DEPLOY_DOMAIN`  | Custom domain to serve at, in a zone on your Cloudflare account; the deploy creates its DNS record and certificate                          | `mise.local.toml` | repository variable | build variable |
-| `REPOSITORY_URL` | Repository named in the User-Agent `mcp-toolshed (+<repository URL>)`, so the platforms' API operators can tell whose deployment is calling | `mise.local.toml` | set automatically   | build variable |
+| Setting          | What it does                                                                                                                                                                                                 | Locally           | CI                  | Workers Builds |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ------------------- | -------------- |
+| `DEPLOY_DOMAIN`  | Custom domain to serve at, in a zone on your Cloudflare account; the deploy creates its DNS record and certificate                                                                                           | `mise.local.toml` | repository variable | build variable |
+| `REPOSITORY_URL` | Repository named in the User-Agent `mcp-toolshed (+<repository URL>)`, so the platforms' API operators can tell whose deployment is calling. Without it the User-Agent is `mcp-toolshed (Cloudflare Worker)` | `mise.local.toml` | set automatically   | build variable |
 
-For local settings, copy `mise.local.toml.example` to `mise.local.toml`, which is gitignored.
+Both are optional. For local settings, copy `mise.local.toml.example` to `mise.local.toml`, which is gitignored. The Deploy to Cloudflare setup page asks for neither; add them later as build variables if you want them.
 
 ### Connect a client
 
