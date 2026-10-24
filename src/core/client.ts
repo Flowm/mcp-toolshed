@@ -31,8 +31,8 @@ export interface JsonClientOptions {
   unwrap?: (body: unknown) => Unwrapped;
   /** Whether a failed call is worth one retry. By default any 5xx, including Cloudflare's 520-524 edge errors. */
   retryable?: (status: number, detail: string) => boolean;
-  /** Advice appended to an error message, e.g. how to narrow a query that timed out. */
-  hint?: (detail: string) => string | undefined;
+  /** Advice appended to an error message, e.g. how to narrow a query that timed out, given the call's parameters. */
+  hint?: (detail: string, params: Params) => string | undefined;
   /** Wait before the retry, 1s by default; tests set it to 0. */
   retryDelayMs?: number;
 }
@@ -49,7 +49,7 @@ export function createJsonClient({
   hint = () => undefined,
   retryDelayMs = 1000,
 }: JsonClientOptions): Get {
-  async function attempt(url: URL): Promise<Attempt> {
+  async function attempt(url: URL, params: Params): Promise<Attempt> {
     const res = await fetch(url, { headers: { Accept: "application/json", "User-Agent": userAgent(env.REPOSITORY_URL) } });
 
     if (res.status === 429) {
@@ -71,10 +71,12 @@ export function createJsonClient({
     let detail = `non-JSON response: ${body.slice(0, 300)}`;
     if (result && "error" in result) detail = result.error;
     else if (isJson) detail = `unexpected response: ${body.slice(0, 300) || "(empty)"}`;
+    const advice = hint(detail, params);
+    const message = `${name} error (HTTP ${res.status}) for ${url.pathname}: ${detail}`;
     return {
       ok: false,
       retryable: retryable(res.status, detail),
-      error: new ApiError(`${name} error (HTTP ${res.status}) for ${url.pathname}: ${detail}${hint(detail) ?? ""}`),
+      error: new ApiError(advice ? `${message}${/[.!?]$/.test(detail) ? "" : "."} ${advice}` : message),
     };
   }
 
@@ -85,10 +87,10 @@ export function createJsonClient({
       url.searchParams.set(key, Array.isArray(value) ? value.join(",") : String(value));
     }
 
-    let result = await attempt(url);
+    let result = await attempt(url, params);
     if (!result.ok && result.retryable) {
       await sleep(retryDelayMs);
-      result = await attempt(url);
+      result = await attempt(url, params);
     }
     if (!result.ok) throw result.error;
     return result.data as T;

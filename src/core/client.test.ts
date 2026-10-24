@@ -64,8 +64,8 @@ describe("createJsonClient", () => {
 
   it("uses the API's retry rule and hint", async () => {
     const fetch = stubFetch(respond("slow", { status: 408 }), respond("slow", { status: 408 }));
-    const get = client({ retryable: (status) => status === 408, hint: (detail) => (detail.includes("slow") ? " Try later." : undefined) });
-    await expect(get("/x", {})).rejects.toThrow("Example error (HTTP 408) for /x: non-JSON response: slow Try later.");
+    const get = client({ retryable: (status) => status === 408, hint: (detail) => (detail.includes("slow") ? "Try later." : undefined) });
+    await expect(get("/x", {})).rejects.toThrow("Example error (HTTP 408) for /x: non-JSON response: slow. Try later.");
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 

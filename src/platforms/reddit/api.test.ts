@@ -38,14 +38,26 @@ describe("Arctic Shift client", () => {
 
   it("gives up after the second failure and suggests narrowing a timed-out query", async () => {
     const fetch = stubFetch(timeout(), timeout());
-    await expect(callApi("/api/posts/search/aggregate", {})).rejects.toThrow(/HTTP 422.*Timeout\. Maybe slow down a bit Try narrowing the query/);
+    await expect(callApi("/api/posts/search/aggregate", {})).rejects.toThrow(
+      "Arctic Shift error (HTTP 422) for /api/posts/search/aggregate: Timeout. Maybe slow down a bit. " +
+        "Try narrowing the query: add subreddit or author, add an after/before date range.",
+    );
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("treats an error field in a 200 response as a failure, retrying timeouts", async () => {
     const fetch = stubFetch(respond('{"error":"Query timed out"}'), respond('{"error":"Query timed out"}'));
-    await expect(callApi("/api/comments/search", {})).rejects.toThrow(/HTTP 200.*Query timed out Try narrowing/);
+    await expect(callApi("/api/comments/search", {})).rejects.toThrow(/HTTP 200.*Query timed out\. Try narrowing/);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [{ subreddit: "espresso", after: "2025-06-01", limit: 25 }, "Try narrowing the query: add before to shorten the date range."],
+    [{ author: "spez", after: "2020", before: "2021", limit: "auto" }, "Try narrowing the query: shorten the after/before range, a lower limit."],
+    [{ subreddit: "espresso", body: "VS3", after: "2025-06-01" }, "Find threads with search_posts query instead"],
+  ])("suggests only narrowing steps a timed-out query %j has not taken", async (params, hint) => {
+    stubFetch(timeout(), timeout());
+    await expect(callApi("/api/comments/search", params)).rejects.toThrow(hint);
   });
 
   it("reports JSON bodies that are not an API response", async () => {

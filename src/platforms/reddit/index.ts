@@ -368,6 +368,6 @@ export const reddit: Platform = {
     "Read-only access to the Arctic Shift archive of Reddit. For any Reddit link, start with get_thread. " +
     "Results are compact markdown by default; pass format=json for raw records. " +
     "Search results are sorted by date only; for most active authors or subreddits, set group_by on search_posts/search_comments. " +
-    `If a query times out, narrow it with subreddit, author or an after/before range. ${FRESHNESS}`,
+    FRESHNESS,
   registerTools,
 };
