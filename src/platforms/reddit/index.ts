@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import type { Params } from "../../core/client.ts";
+import { flag, numeric } from "../../core/input.ts";
 import { DEFAULT_MAX_CHARS, fieldsFor, limitChars, type Output, outputSettings, type Render, renderJson, respond } from "../../core/output.ts";
 import type { Platform } from "../../core/platform.ts";
 import { apiParams, fetchAndRender, InputError, onlyWith, readOnly, toolResult } from "../../core/tool.ts";
@@ -46,14 +47,14 @@ const commonFilters = {
 const postFilters = {
   ...commonFilters,
   crosspost_parent_id: postRef.optional().describe("Only crossposts of this post (ID or URL)"),
-  over_18: z.boolean().optional(),
-  spoiler: z.boolean().optional(),
+  over_18: flag().optional(),
+  spoiler: flag().optional(),
   title: z.string().optional().describe("Keyword search in title. Requires author or subreddit."),
   selftext: z.string().optional().describe("Keyword search in body text. Requires author or subreddit."),
   link_flair_text: z.string().optional().describe("Keyword search on post flair"),
   query: z.string().optional().describe("Keyword search in title and selftext. Requires author or subreddit."),
   url: z.string().optional().describe("Prefix match on the linked URL"),
-  url_exact: z.boolean().optional().describe("Only exact matches for url"),
+  url_exact: flag().optional().describe("Only exact matches for url"),
 };
 
 const commentFilters = {
@@ -69,9 +70,9 @@ const searchOptionsSchema = z.object({
     .optional()
     .describe("Count matches per date bucket, author or subreddit instead of listing them. Very active users or subreddits may time out."),
   frequency: z.string().optional().describe("Bucket size, required with group_by=created_utc (year, month, week, day, hour); that grouping also needs after or before"),
-  min_count: z.number().int().min(0).optional().describe("With group_by=author/subreddit: skip groups with fewer matches"),
+  min_count: numeric(z.number().int().min(0)).optional().describe("With group_by=author/subreddit: skip groups with fewer matches"),
   limit: z
-    .union([z.number().int().min(1), z.literal("auto")])
+    .union([numeric(z.number().int().min(1)), z.literal("auto")])
     .optional()
     .describe('Listing: 1-100 (default 25), or "auto" for 100-1000 depending on server load. With group_by: max groups (default all).'),
   sort: z.enum(["asc", "desc"]).optional().describe("Listing: by creation date, the only order the API supports. With group_by: by count, or by date for created_utc."),
@@ -140,11 +141,11 @@ function registerTools(server: McpServer): void {
         "A comment URL or ID focuses on that comment's subtree. Collapsed branches show as [+N more] with how to expand them.",
       inputSchema: z.object({
         url_or_id: z.string().describe("Reddit post or comment URL, share link (/r/<sub>/s/<code>), redd.it link, or ID (bare = post, t3_ = post, t1_ = comment)"),
-        comment_limit: z.number().int().min(0).max(25000).optional().describe("Max comments to fetch (default 100). 0 returns the post only."),
+        comment_limit: numeric(z.number().int().min(0).max(25000)).optional().describe("Max comments to fetch (default 100). 0 returns the post only."),
         parent_id: commentRef.optional().describe("Only return the subtree of this comment (ID or URL)"),
         sort: z.enum(["tree", "top"]).optional().describe("tree (default): Reddit's order. top: highest score first at each level."),
-        start_depth: z.number().int().min(0).optional().describe("Reply levels to expand before collapsing (default 4)"),
-        start_breadth: z.number().int().min(0).optional().describe("Replies per level to expand before collapsing (default 4)"),
+        start_depth: numeric(z.number().int().min(0)).optional().describe("Reply levels to expand before collapsing (default 4)"),
+        start_breadth: numeric(z.number().int().min(0)).optional().describe("Replies per level to expand before collapsing (default 4)"),
         ...output,
       }),
       annotations: readOnly,
@@ -237,10 +238,10 @@ function registerTools(server: McpServer): void {
         subreddit_prefix: z.string().optional(),
         after: date.optional().describe("Subreddit created after"),
         before: date.optional().describe("Subreddit created before"),
-        min_subscribers: z.number().int().optional(),
-        max_subscribers: z.number().int().optional(),
-        over18: z.boolean().optional(),
-        limit: z.number().int().min(1).max(1000).optional().describe("Default 25"),
+        min_subscribers: numeric(z.number().int()).optional(),
+        max_subscribers: numeric(z.number().int()).optional(),
+        over18: flag().optional(),
+        limit: numeric(z.number().int().min(1).max(1000)).optional().describe("Default 25"),
         sort: z.enum(["asc", "desc"]).optional().describe("Default desc"),
         sort_type: z.enum(["created_utc", "subscribers", "subreddit"]).optional().describe("Default subscribers"),
         fields,
@@ -271,8 +272,8 @@ function registerTools(server: McpServer): void {
       inputSchema: z.object({
         subreddit: z.string().optional(),
         paths: z.array(z.string()).max(100).optional(),
-        limit: z.number().int().min(1).max(100).optional(),
-        list_only: z.boolean().optional().describe("Return only the wiki page paths (requires subreddit)"),
+        limit: numeric(z.number().int().min(1).max(100)).optional(),
+        list_only: flag().optional().describe("Return only the wiki page paths (requires subreddit)"),
         ...output,
       }),
       annotations: readOnly,
@@ -293,11 +294,11 @@ function registerTools(server: McpServer): void {
       inputSchema: z.object({
         author: z.string().optional(),
         author_prefix: z.string().optional(),
-        min_num_posts: z.number().int().optional(),
-        min_num_comments: z.number().int().optional(),
+        min_num_posts: numeric(z.number().int()).optional(),
+        min_num_comments: numeric(z.number().int()).optional(),
         active_since: date.optional(),
-        min_karma: z.number().int().optional(),
-        limit: z.number().int().min(1).max(1000).optional().describe("Default 25"),
+        min_karma: numeric(z.number().int()).optional(),
+        limit: numeric(z.number().int().min(1).max(1000)).optional().describe("Default 25"),
         sort: z.enum(["asc", "desc"]).optional(),
         sort_type: z.enum(["author", "total_karma"]).optional(),
         ...output,
@@ -321,10 +322,10 @@ function registerTools(server: McpServer): void {
         subreddit: z.string().optional().describe("Only for with=users/users_list"),
         after: date.optional(),
         before: date.optional(),
-        min_count: z.number().int().min(0).optional(),
-        limit: z.number().int().min(1).optional().describe("Default 100"),
-        weight_posts: z.number().optional().describe("Only for with=subreddits (default 1.0)"),
-        weight_comments: z.number().optional().describe("Only for with=subreddits (default 1.0)"),
+        min_count: numeric(z.number().int().min(0)).optional(),
+        limit: numeric(z.number().int().min(1)).optional().describe("Default 100"),
+        weight_posts: numeric().optional().describe("Only for with=subreddits (default 1.0)"),
+        weight_comments: numeric().optional().describe("Only for with=subreddits (default 1.0)"),
         ...output,
       }),
       annotations: readOnly,

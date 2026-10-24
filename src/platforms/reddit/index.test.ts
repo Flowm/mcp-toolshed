@@ -166,6 +166,13 @@ describe("MCP server", () => {
     expect(api.fetch).not.toHaveBeenCalled();
   });
 
+  it("accepts numbers and booleans sent as strings", async () => {
+    const api = stubApi();
+    const result = await callTool("search_posts", { subreddit: "espresso", query: "Profitec Go", limit: "25", max_chars: "15000", over_18: "false" });
+    expect(result.isError).toBe(false);
+    expect(api.requests()).toEqual([{ path: "/api/posts/search", params: expect.objectContaining({ limit: "25", over_18: "false" }) }]);
+  });
+
   it("rejects out-of-range arguments before calling the API", async () => {
     const api = stubApi();
     const result = await callTool("search_posts", { limit: 0 });
