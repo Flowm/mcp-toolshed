@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { FRESHNESS_NOTE, renderComments, renderCounts, renderPosts, renderRules, renderSubreddits, renderThread, renderTimeSeries, renderUsers, renderWikis } from "./render.ts";
+import { FRESHNESS_NOTE, renderComments, renderCounts, renderPosts, renderSubredditInfo, renderSubreddits, renderThread, renderTimeSeries } from "./render.ts";
 
 const OLD = 1577799850; // 2019-12-31 13:44 UTC
 const fresh = () => Math.floor(Date.now() / 1000) - 3600;
@@ -143,39 +143,6 @@ describe("other renderers", () => {
     expect(text).toBe("1 subreddit:\n\n- **r/AskReddit** · 51,551,345 subscribers · created 2008-01-25 · `2qh1i`\n  Ask.");
   });
 
-  it("renders user stats", () => {
-    const text = renderUsers([
-      {
-        author: "spez",
-        id: "1w72",
-        _meta: {
-          total_karma: 1499932,
-          post_karma: 832984,
-          comment_karma: 666948,
-          num_posts: 549,
-          num_comments: 2568,
-          earliest_post_at: 1119552314,
-          earliest_comment_at: 1134392748,
-          last_post_at: 1751475161,
-          last_comment_at: 1729645028,
-        },
-      },
-    ]);
-    expect(text).toBe(
-      "1 user:\n\n- **u/spez** · `1w72` · 1,499,932 karma (832,984 post, 666,948 comment) · 549 posts · 2,568 comments · first active 2005-06-23 · last active 2025-07-02",
-    );
-  });
-
-  it("renders counts keyed by author, subreddit or date bucket", () => {
-    expect(
-      renderCounts([
-        { author: "raldi", count: "57" },
-        { subreddit: "announcements", count: 663 },
-        { created_utc: "2019-12-31T23:00:00.000Z", count: "1104" },
-      ]),
-    ).toBe("3 rows:\n\n- u/raldi: 57\n- r/announcements: 663\n- 2019-12-31T23:00:00.000Z: 1,104");
-  });
-
   // Arctic Shift starts buckets at midnight in its own time zone (UTC+1 here), so they arrive an hour early in UTC.
   it.each([
     ["year", "2005-12-31T23:00:00.000Z", "2006"],
@@ -189,7 +156,7 @@ describe("other renderers", () => {
   });
 
   it("shows a missing count as ?", () => {
-    expect(renderCounts([{ author: "a" }, { author: "b", count: "n/a" }])).toBe("2 rows:\n\n- u/a: ?\n- u/b: ?");
+    expect(renderCounts([{ key: "a" }, { key: "b", count: "n/a" }], { group: "author" })).toBe("2 rows:\n\n- u/a: ?\n- u/b: ?");
   });
 
   it("labels search aggregate keys by the grouping", () => {
@@ -206,10 +173,32 @@ describe("other renderers", () => {
     ).toBe("2 data points:\n\n- 2018-01-01: 20,050,347\n- 2019-01-01: 23,146,686.44");
   });
 
-  it("renders rules and wiki pages", () => {
-    expect(renderRules([{ subreddit: "AskReddit", rules: [{ short_name: "Rule 1", kind: "link", description: "Be clear\n* really" }] }])).toBe(
-      "## r/AskReddit\n\n1. **Rule 1** (applies to: link)\n   Be clear\n   * really",
+  it("renders the subreddit info sections that were fetched", () => {
+    const about = {
+      title: "Ask anything",
+      subscribers: 51551345,
+      created_utc: 1201233135,
+      subreddit_type: "public",
+      retrieved_on: 1739565078,
+      description: "Ask.\r\nMore",
+      _meta: { num_posts: 2000, num_comments: 1 },
+    };
+    const rules = [{ short_name: "Rule 1", kind: "link", description: "Be clear\n* really" }];
+    expect(renderSubredditInfo("AskReddit", { about, rules, wiki: ["/r/askreddit/wiki/faq"] })).toBe(
+      "# r/AskReddit\n\n" +
+        "## About\n\n_Ask anything_\n\n51,551,345 subscribers · created 2008-01-25 · 2,000 posts archived · 1 comment archived · details as of 2025-02-14\n\nAsk.\nMore\n\n" +
+        "## Rules\n\n1. **Rule 1** (applies to: link)\n   Be clear\n   * really\n\n" +
+        "## Wiki\n\n1 page (read them with wiki_pages):\n\n- /r/askreddit/wiki/faq",
     );
-    expect(renderWikis([{ path: "/r/travel/wiki/faq", content: "Hello\r\nWorld" }])).toBe("## /r/travel/wiki/faq\n\nHello\nWorld");
+    expect(renderSubredditInfo("nope", { about: null, rules: [], wiki: [] })).toBe(
+      "# r/nope\n\n## About\n\n_Not in the archive. Check the name, or find it with search_subreddits._\n\n## Rules\n\n_No rules found._\n\n## Wiki\n\n_No wiki pages found._",
+    );
+  });
+
+  it("renders wiki pages read, noting missing ones first", () => {
+    const pages = [{ path: "/r/travel/wiki/faq", content: "Hello\r\nWorld" }];
+    expect(renderSubredditInfo("travel", { wiki: pages }, ["/r/Travel/wiki/FAQ", "/r/travel/wiki/nope"])).toBe(
+      "# r/travel\n\n_Not found: /r/travel/wiki/nope_\n\n## /r/travel/wiki/faq\n\nHello\nWorld",
+    );
   });
 });

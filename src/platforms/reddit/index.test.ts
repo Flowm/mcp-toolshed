@@ -48,16 +48,12 @@ describe("MCP server", () => {
   it("lists every tool as read-only, each with format and max_chars", async () => {
     const { tools } = await rpc("tools/list");
     expect(tools.map((t: { name: string }) => t.name).toSorted()).toEqual([
-      "get_by_ids",
-      "get_subreddit_rules",
-      "get_subreddit_wikis",
+      "get_subreddit_info",
       "get_thread",
       "get_time_series",
-      "get_user_interactions",
       "search_comments",
       "search_posts",
       "search_subreddits",
-      "search_users",
     ]);
     for (const tool of tools) {
       expect(tool.annotations.readOnlyHint).toBe(true);
@@ -104,11 +100,12 @@ describe("MCP server", () => {
   });
 
   it.each([
-    ["get_by_ids", { kind: "comments", ids: ["abc"], format: "json" }, "/api/comments/ids", { ids: "t1_abc" }],
-    ["get_by_ids", { kind: "subreddits", ids: ["2qh1i"], format: "json" }, "/api/subreddits/ids", { ids: "2qh1i" }],
-    ["get_user_interactions", { author: "spez", with: "users_list" }, "/api/users/interactions/users/list", { author: "spez" }],
-    ["get_subreddit_wikis", { subreddit: "askreddit", list_only: true }, "/api/subreddits/wikis/list", { subreddit: "askreddit" }],
-    ["get_subreddit_wikis", { paths: ["/r/travel/wiki/faq"] }, "/api/subreddits/wikis", { paths: "/r/travel/wiki/faq" }],
+    [
+      "get_subreddit_info",
+      { subreddit: "r/travel", wiki_pages: ["faq", "/wiki/visa/", "https://www.reddit.com/r/solotravel/wiki/index"] },
+      "/api/subreddits/wikis",
+      { paths: "/r/travel/wiki/faq,/r/travel/wiki/visa,/r/solotravel/wiki/index" },
+    ],
   ])("routes %s to the matching endpoint", async (name, args, path, params) => {
     const api = stubApi();
     const { isError } = await callTool(name, args);
@@ -143,12 +140,32 @@ describe("MCP server", () => {
     expect(api.fetch).not.toHaveBeenCalled();
   });
 
-  it.each([
-    [{ author: "spez", with: "subreddits", subreddit: "pics" }, "subreddit only applies with with=users or with=users_list."],
-    [{ author: "spez", with: "users", weight_posts: 2, weight_comments: 1 }, "weight_posts and weight_comments only apply with with=subreddits."],
-  ])("rejects interaction options of another mode %j", async (args, message) => {
+  it("gets a subreddit's about, rules and wiki page list in one call", async () => {
+    const api = stubApi({
+      "/api/subreddits/search": [{ display_name: "travel", subscribers: 2 }],
+      "/api/subreddits/rules": [{ subreddit: "travel", rules: [{ short_name: "Be kind" }] }],
+      "/api/subreddits/wikis/list": ["/r/travel/wiki/faq"],
+    });
+    const { text } = await callTool("get_subreddit_info", { subreddit: "r/travel" });
+    expect(text).toBe("# r/travel\n\n## About\n\n2 subscribers\n\n## Rules\n\n1. **Be kind**\n\n## Wiki\n\n1 page (read them with wiki_pages):\n\n- /r/travel/wiki/faq");
+    expect(api.requests()).toEqual([
+      { path: "/api/subreddits/search", params: { subreddit: "travel" } },
+      { path: "/api/subreddits/rules", params: { subreddits: "travel" } },
+      { path: "/api/subreddits/wikis/list", params: { subreddit: "travel" } },
+    ]);
+  });
+
+  it("returns only the subreddit sections in include, as JSON keyed by section", async () => {
+    const api = stubApi({ "/api/subreddits/rules": [{ subreddit: "travel", rules: [{ short_name: "Be kind" }] }] });
+    const { text } = await callTool("get_subreddit_info", { subreddit: "travel", include: ["rules"], format: "json" });
+    expect(JSON.parse(text)).toEqual({ rules: [{ short_name: "Be kind" }] });
+    expect(api.requests().map((request) => request.path)).toEqual(["/api/subreddits/rules"]);
+  });
+
+  it("rejects wiki_pages when include leaves out the wiki", async () => {
     const api = stubApi();
-    expect(await callTool("get_user_interactions", args)).toEqual({ isError: true, text: message });
+    const result = await callTool("get_subreddit_info", { subreddit: "travel", include: ["rules"], wiki_pages: ["faq"] });
+    expect(result).toEqual({ isError: true, text: "wiki_pages only applies with wiki in include." });
     expect(api.fetch).not.toHaveBeenCalled();
   });
 
@@ -160,7 +177,7 @@ describe("MCP server", () => {
 
   it("returns unreadable IDs as tool errors without calling the API", async () => {
     const api = stubApi();
-    const result = await callTool("get_by_ids", { kind: "posts", ids: ["https://example.com/x"] });
+    const result = await callTool("search_comments", { link_id: "https://example.com/x" });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("example.com is not a Reddit URL");
     expect(api.fetch).not.toHaveBeenCalled();

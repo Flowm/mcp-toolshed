@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InputError } from "../../core/tool.ts";
-import { resolveId, resolveIds, resolveTarget } from "./targets.ts";
+import { resolveId, resolveTarget } from "./targets.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -48,20 +48,19 @@ describe("resolveTarget", () => {
   });
 });
 
-describe("resolveIds", () => {
-  it("normalizes IDs and URLs, resolving all share links in one request", async () => {
-    const fetch = stubShortLinks([
-      { original_path: "/r/a/s/one", resolved_path: "/r/a/comments/p1/t/" },
-      { original_path: "/u/b/s/two", resolved_path: "/r/b/comments/p2/t/c2/" },
-    ]);
-    await expect(resolveIds(["abc", "t3_def", "/r/a/s/one", "https://reddit.com/u/b/s/two", "https://www.reddit.com/r/x/comments/ghi/t/c1/"], "t3")).resolves.toEqual([
-      "t3_abc",
-      "t3_def",
-      "t3_p1",
-      "t3_p2",
-      "t3_ghi",
-    ]);
-    expect(fetch).toHaveBeenCalledTimes(1);
+describe("resolveId", () => {
+  it.each([
+    ["abc", "t3", "t3_abc"],
+    ["t3_def", "t3", "t3_def"],
+    ["https://www.reddit.com/r/x/comments/ghi/t/c1/", "t3", "t3_ghi"],
+    ["https://www.reddit.com/r/x/comments/ghi/t/c1/", "t1", "t1_c1"],
+  ] as const)("reads %s as a %s ID", async (input, kind, id) => {
+    await expect(resolveId(input, kind)).resolves.toBe(id);
+  });
+
+  it("resolves a share link to the ID asked for", async () => {
+    stubShortLinks([{ original_path: "/u/b/s/two", resolved_path: "/r/b/comments/p2/t/c2/" }]);
+    await expect(resolveId("https://reddit.com/u/b/s/two", "t1")).resolves.toBe("t1_c2");
   });
 
   it("rejects references of the wrong kind", async () => {

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { Params } from "../../core/client.ts";
 import { flag, numeric } from "../../core/input.ts";
+import { asList } from "../../core/markdown.ts";
 import { DEFAULT_MAX_CHARS, fieldsFor, limitChars, type Output, outputSettings, type Render, renderJson, respond } from "../../core/output.ts";
 import type { Platform } from "../../core/platform.ts";
 import { apiParams, fetchAndRender, InputError, onlyWith, readOnly, toolResult } from "../../core/tool.ts";
@@ -11,17 +12,16 @@ import {
   FRESHNESS,
   renderComments,
   renderCounts,
-  renderInteractionList,
   renderPosts,
-  renderRules,
+  renderSubredditInfo,
   renderSubreddits,
   renderThread,
   renderTimeSeries,
-  renderUsers,
-  renderWikiPaths,
-  renderWikis,
+  SUBREDDIT_SECTIONS,
+  type SubredditInfo,
+  type SubredditSection,
 } from "./render.ts";
-import { type Kind, resolveId, resolveIds, resolveTarget } from "./targets.ts";
+import { resolveId, resolveTarget } from "./targets.ts";
 
 // Fields the markdown renderers use; requested by default so responses stay small and fast.
 const POST_FIELDS = ["id", "title", "author", "subreddit", "score", "num_comments", "created_utc", "url", "selftext", "over_18", "link_flair_text"];
@@ -82,19 +82,6 @@ const searchOptionsSchema = z.object({
 type SearchOptions = z.infer<typeof searchOptionsSchema>;
 const searchOptions = searchOptionsSchema.shape;
 
-// get_by_ids: the ID kind each lookup resolves URLs to (subreddit IDs are plain), its default fields and renderer.
-const ID_LOOKUPS: Record<"posts" | "comments" | "subreddits", { kind?: Kind; defaults: string[]; render: Render }> = {
-  posts: { kind: "t3", defaults: POST_FIELDS, render: renderPosts },
-  comments: { kind: "t1", defaults: COMMENT_FIELDS, render: renderComments },
-  subreddits: { defaults: SUBREDDIT_FIELDS, render: renderSubreddits },
-};
-
-const INTERACTION_ENDPOINTS: Record<"users" | "users_list" | "subreddits", { path: string; render: Render }> = {
-  users: { path: "/api/users/interactions/users", render: renderCounts },
-  users_list: { path: "/api/users/interactions/users/list", render: renderInteractionList },
-  subreddits: { path: "/api/users/interactions/subreddits", render: renderCounts },
-};
-
 /** Handler for a tool that forwards its arguments to one Arctic Shift endpoint. */
 const forward = (path: string, render: Render) => (args: Output & Params) => toolResult(() => fetchAndRender(callApi, path, args, render));
 
@@ -129,6 +116,12 @@ async function searchOrCount(path: string, options: SearchOptions & Params, defa
   if (group_by === "created_utc" && !frequency) throw new InputError("group_by=created_utc needs frequency (e.g. year, month, day).");
   const data = await callApi(`${path}/aggregate`, { ...filters, aggregate: group_by, frequency, min_count });
   return respond(data, options, (rows) => renderCounts(rows, { group: group_by, frequency }));
+}
+
+/** A wiki page as Arctic Shift names it, /r/<subreddit>/wiki/<page>, from a page name, path or URL. */
+function wikiPath(subreddit: string, page: string): string {
+  const path = /\/r\/[^/]+\/wiki\/[^?#]+/i.exec(page)?.[0] ?? `/r/${subreddit}/wiki/${page.replace(/^\/*(?:wiki\/)?/i, "")}`;
+  return path.replace(/\/+$/, "");
 }
 
 function registerTools(server: McpServer): void {
@@ -205,30 +198,6 @@ function registerTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "get_by_ids",
-    {
-      title: "Look up by ID",
-      description:
-        "Fetch posts, comments or subreddits by ID (up to 500). Posts and comments also accept Reddit URLs and share links. " +
-        "Useful for IDs found in search results or interaction lists.",
-      inputSchema: z.object({
-        kind: z.enum(["posts", "comments", "subreddits"]),
-        ids: z.array(z.string()).min(1).max(500).describe("IDs (e.g. ei30r4, t3_ei30r4) or, for posts and comments, Reddit URLs"),
-        fields,
-        ...output,
-      }),
-      annotations: readOnly,
-    },
-    ({ kind, ids, fields: requested, ...settings }) =>
-      toolResult(async () => {
-        const lookup = ID_LOOKUPS[kind];
-        const resolved = lookup.kind ? await resolveIds(ids, lookup.kind) : ids;
-        const data = await callApi(`/api/${kind}/ids`, { ids: resolved, fields: fieldsFor(settings.format, requested, lookup.defaults) });
-        return respond(data, settings, lookup.render);
-      }),
-  );
-
-  server.registerTool(
     "search_subreddits",
     {
       title: "Search subreddits",
@@ -254,88 +223,34 @@ function registerTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "get_subreddit_rules",
+    "get_subreddit_info",
     {
-      title: "Get subreddit rules",
-      description: "Get the rules of one or more subreddits.",
-      inputSchema: z.object({ subreddits: z.array(z.string()).min(1).max(1000), ...output }),
-      annotations: readOnly,
-    },
-    forward("/api/subreddits/rules", renderRules),
-  );
-
-  server.registerTool(
-    "get_subreddit_wikis",
-    {
-      title: "Get subreddit wiki pages",
-      description: "Get wiki page contents, either all pages of a subreddit or specific paths (e.g. /r/travel/wiki/faq). Set list_only to get just the page paths of a subreddit.",
-      inputSchema: z.object({
-        subreddit: z.string().optional(),
-        paths: z.array(z.string()).max(100).optional(),
-        limit: numeric(z.number().int().min(1).max(100)).optional(),
-        list_only: flag().optional().describe("Return only the wiki page paths (requires subreddit)"),
-        ...output,
-      }),
-      annotations: readOnly,
-    },
-    ({ list_only, ...args }) =>
-      toolResult(() =>
-        list_only
-          ? fetchAndRender(callApi, "/api/subreddits/wikis/list", { subreddit: args.subreddit, format: args.format, max_chars: args.max_chars }, renderWikiPaths)
-          : fetchAndRender(callApi, "/api/subreddits/wikis", args, renderWikis),
-      ),
-  );
-
-  server.registerTool(
-    "search_users",
-    {
-      title: "Search users",
-      description: "Find users by name, name prefix, karma, activity counts. Returns aggregate stats (post/comment counts, first/last activity, karma); updated infrequently.",
-      inputSchema: z.object({
-        author: z.string().optional(),
-        author_prefix: z.string().optional(),
-        min_num_posts: numeric(z.number().int()).optional(),
-        min_num_comments: numeric(z.number().int()).optional(),
-        active_since: date.optional(),
-        min_karma: numeric(z.number().int()).optional(),
-        limit: numeric(z.number().int().min(1).max(1000)).optional().describe("Default 25"),
-        sort: z.enum(["asc", "desc"]).optional(),
-        sort_type: z.enum(["author", "total_karma"]).optional(),
-        ...output,
-      }),
-      annotations: readOnly,
-    },
-    forward("/api/users/search", renderUsers),
-  );
-
-  server.registerTool(
-    "get_user_interactions",
-    {
-      title: "Get user interactions",
+      title: "Get subreddit info",
       description:
-        "See who or where a user interacts. with=users: aggregated reply counts with other users; " +
-        "with=users_list: individual interactions; with=subreddits: activity per subreddit. " +
-        "Very active users may time out; narrow with after/before.",
+        "Get a subreddit's description and stats (about), its rules and its wiki, in one call; include picks the sections. " +
+        "The wiki section lists the wiki pages; set wiki_pages to read pages instead, by name (faq, guides/glossary), path or URL.",
       inputSchema: z.object({
-        author: z.string(),
-        with: z.enum(["users", "users_list", "subreddits"]),
-        subreddit: z.string().optional().describe("Only for with=users/users_list"),
-        after: date.optional(),
-        before: date.optional(),
-        min_count: numeric(z.number().int().min(0)).optional(),
-        limit: numeric(z.number().int().min(1)).optional().describe("Default 100"),
-        weight_posts: numeric().optional().describe("Only for with=subreddits (default 1.0)"),
-        weight_comments: numeric().optional().describe("Only for with=subreddits (default 1.0)"),
+        subreddit: z.string().describe("Subreddit name (r/ prefix optional)"),
+        include: z.array(z.enum(SUBREDDIT_SECTIONS)).min(1).optional().describe("Sections to return. Default: all, or only wiki when wiki_pages is set."),
+        wiki_pages: z.array(z.string()).min(1).max(100).optional().describe("Wiki pages to read, e.g. faq or /r/travel/wiki/faq"),
         ...output,
       }),
       annotations: readOnly,
     },
-    ({ with: target, ...args }) =>
+    ({ subreddit, include, wiki_pages, ...settings }) =>
       toolResult(async () => {
-        onlyWith(args, ["subreddit"], target !== "subreddits", "with=users or with=users_list");
-        onlyWith(args, ["weight_posts", "weight_comments"], target === "subreddits", "with=subreddits");
-        const endpoint = INTERACTION_ENDPOINTS[target];
-        return fetchAndRender(callApi, endpoint.path, args, endpoint.render);
+        onlyWith({ wiki_pages }, ["wiki_pages"], !include || include.includes("wiki"), "wiki in include");
+        // The rules and wiki endpoints return nothing for a name with an r/ prefix.
+        const name = subreddit.replace(/^\/?r\//i, "");
+        const paths = wiki_pages?.map((page) => wikiPath(name, page));
+        const fetchSection: Record<SubredditSection, () => Promise<unknown>> = {
+          about: async () => asList(await callApi("/api/subreddits/search", { subreddit: name }))[0] ?? null,
+          rules: async () => asList(await callApi("/api/subreddits/rules", { subreddits: name }))[0]?.rules ?? [],
+          wiki: () => (paths ? callApi("/api/subreddits/wikis", { paths }) : callApi("/api/subreddits/wikis/list", { subreddit: name })),
+        };
+        const sections = new Set(include ?? (paths ? ["wiki" as const] : SUBREDDIT_SECTIONS));
+        const data: SubredditInfo = Object.fromEntries(await Promise.all([...sections].map(async (section) => [section, await fetchSection[section]()])));
+        return respond(data, settings, () => renderSubredditInfo(name, data, paths));
       }),
   );
 
@@ -363,7 +278,7 @@ export const reddit: Platform = {
   id: "reddit",
   name: "arctic-shift",
   version: "1.0.0",
-  description: `Query archived Reddit posts, comments, subreddits and users via the Arctic Shift API (${BASE_URL}).`,
+  description: `Query archived Reddit posts, comments and subreddits via the Arctic Shift API (${BASE_URL}).`,
   instructions:
     "Read-only access to the Arctic Shift archive of Reddit. For any Reddit link, start with get_thread. " +
     "Results are compact markdown by default; pass format=json for raw records. " +

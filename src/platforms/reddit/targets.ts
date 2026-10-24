@@ -73,28 +73,17 @@ function parse(input: string, bareKind: Kind): Parsed {
   throw new InputError(`Could not read a Reddit post or comment from ${JSON.stringify(input)}. ${HELP}`);
 }
 
-/** Resolves inputs to targets; all share links are expanded with a single /api/short_links call. */
-async function resolveTargets(inputs: string[], bareKind: Kind): Promise<Target[]> {
-  const parsed = inputs.map((input) => parse(input, bareKind));
-  const sharePaths = [...new Set(parsed.flatMap((p) => ("sharePath" in p ? [p.sharePath] : [])))];
-  if (sharePaths.length === 0) return parsed as Target[];
-
-  const links = (await callApi<{ original_path?: string; resolved_path?: string }[] | null>("/api/short_links", { paths: sharePaths })) ?? [];
-  const resolved = new Map(links.map((link) => [link.original_path, link.resolved_path]));
-
-  return parsed.map((p) => {
-    if (!("sharePath" in p)) return p;
-    const target = resolved.get(p.sharePath);
-    if (!target) throw new InputError(`Arctic Shift has not archived the share link ${p.sharePath}. Open it in a browser and pass the full /comments/ URL instead.`);
-    const result = parse(target, bareKind);
-    if ("sharePath" in result) throw new InputError(`Share link ${p.sharePath} resolved to another share link (${target}).`);
-    return result;
-  });
-}
-
+/** Resolves an input to a target, expanding a share link through Arctic Shift's /api/short_links. */
 export async function resolveTarget(input: string, bareKind: Kind): Promise<Target> {
-  const [target] = await resolveTargets([input], bareKind);
-  return target!;
+  const parsed = parse(input, bareKind);
+  if (!("sharePath" in parsed)) return parsed;
+
+  const links = (await callApi<{ original_path?: string; resolved_path?: string }[] | null>("/api/short_links", { paths: parsed.sharePath })) ?? [];
+  const target = links.find((link) => link.original_path === parsed.sharePath)?.resolved_path;
+  if (!target) throw new InputError(`Arctic Shift has not archived the share link ${parsed.sharePath}. Open it in a browser and pass the full /comments/ URL instead.`);
+  const result = parse(target, bareKind);
+  if ("sharePath" in result) throw new InputError(`Share link ${parsed.sharePath} resolved to another share link (${target}).`);
+  return result;
 }
 
 function pick(target: Target, kind: Kind, input: string): string {
@@ -103,13 +92,7 @@ function pick(target: Target, kind: Kind, input: string): string {
   return id;
 }
 
-/** Resolves post (t3) or comment (t1) references to prefixed IDs. A comment URL yields its post when asking for t3. */
-export async function resolveIds(inputs: string[], kind: Kind): Promise<string[]> {
-  const targets = await resolveTargets(inputs, kind);
-  return targets.map((target, i) => pick(target, kind, inputs[i]!));
-}
-
+/** Resolves a post (t3) or comment (t1) reference to a prefixed ID. A comment URL yields its post when asking for t3. */
 export async function resolveId(input: string, kind: Kind): Promise<string> {
-  const [id] = await resolveIds([input], kind);
-  return id!;
+  return pick(await resolveTarget(input, kind), kind, input);
 }
